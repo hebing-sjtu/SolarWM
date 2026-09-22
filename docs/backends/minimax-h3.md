@@ -28,13 +28,13 @@ hf download junchaoh-cs/SolarWM-H3-33B \
   --local-dir "$SOLAR_MODEL_ROOT"
 ```
 
-For inference only, download `SolarWM-h3-33B-sgf-stage2-158f`; Stage0.5 and
+For inference only, download `SolarWM-h3-33B-sgf-stage2-158f-fix`; Stage0.5 and
 Stage1 checkpoints are not needed. The base model and the input dependencies
 used by your inference command are still required.
 
 ```bash
 hf download junchaoh-cs/SolarWM-H3-33B \
-  --include "SolarWM-h3-33B-sgf-stage2-158f/**" \
+  --include "SolarWM-h3-33B-sgf-stage2-158f-fix/**" \
   --local-dir "$SOLAR_MODEL_ROOT"
 ```
 
@@ -43,7 +43,7 @@ rendezvous address below; set `NODE_RANK` separately on each node.
 
 ```bash
 export H3_BASE="$SOLAR_MODEL_ROOT/SolarWM-h3-33B-base"
-export H3_STAGE2_CHECKPOINT="$SOLAR_MODEL_ROOT/SolarWM-h3-33B-sgf-stage2-158f"
+export H3_STAGE2_CHECKPOINT="$SOLAR_MODEL_ROOT/SolarWM-h3-33B-sgf-stage2-158f-fix"
 export H3_SUPPORT="$SOLAR_DATA_ROOT/latent-wds/minimax-h3-158f-768p-nomind-v1/support"
 export NNODES=32
 export NODE_RANK=0
@@ -82,7 +82,7 @@ Keep each directory intact under `SOLAR_MODEL_ROOT`.
 hf download junchaoh-cs/SolarWM-H3-33B \
   --include "SolarWM-h3-33B-bid-stage0p5-158f/**" \
             "SolarWM-h3-33B-tf-stage1-158f/**" \
-            "SolarWM-h3-33B-sgf-stage2-158f/**" \
+            "SolarWM-h3-33B-sgf-stage2-158f-fix/**" \
   --local-dir "$SOLAR_MODEL_ROOT"
 ```
 
@@ -90,7 +90,13 @@ hf download junchaoh-cs/SolarWM-H3-33B \
 |---|---|
 | `SolarWM-h3-33B-bid-stage0p5-158f` | Stage0.5 step 10500 |
 | `SolarWM-h3-33B-tf-stage1-158f` | Stage1 step 3000 |
-| `SolarWM-h3-33B-sgf-stage2-158f` | Stage2 step 1200 |
+| `SolarWM-h3-33B-sgf-stage2-158f-fix` | Stage2 step 3900 |
+
+For Stage2 inference, we recommend
+`SolarWM-h3-33B-sgf-stage2-158f-fix` (step 3900 EMA), which supersedes the
+original step 1200 release and improves fine-detail quality, especially in tree
+regions. Use the `-fix` checkpoint directory with
+`checkpoint.weight_source=ema`.
 
 Validation selects fixed cases from the test index automatically. Stage1 also
 reads complete camera trajectories from the raw test data.
@@ -175,6 +181,7 @@ torchrun --standalone --nproc-per-node=8 -m solarwm infer \
   --config configs/examples/minimax_h3/infer-stage2-158f-sp4.yaml \
   --set model.checkpoint_path="$H3_BASE" \
   --set checkpoint.resume_from="$H3_STAGE2_CHECKPOINT" \
+  --set checkpoint.weight_source=ema \
   --set data.index_root="$SOLAR_DATA_ROOT" \
   --set data.transport.root="$SOLAR_DATA_ROOT" \
   --set data.silence_latents_path="$H3_SUPPORT/h3_silence_153_158_170.safetensors" \
@@ -216,7 +223,7 @@ torchrun --standalone --nproc-per-node=8 -m solarwm infer \
   --set model.checkpoint_path="$H3_BASE" \
   --set checkpoint.resume_from="$H3_STAGE2_CHECKPOINT" \
   --set checkpoint.weight_source=ema \
-  --set inference.expected_step=1200 \
+  --set inference.expected_step=3900 \
   --set inference.plan="$H3_TEST_PLAN" \
   --set inference.dataset_root="$SOLAR_TEST_ROOT" \
   --set inference.work_dir="$SOLAR_OUTPUT_ROOT/h3-condition-cache" \
