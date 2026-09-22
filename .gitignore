@@ -16,6 +16,8 @@ uv.lock
 outputs/
 runs/
 checkpoints/
+/demo/
+/tests/demo/
 *.pt
 *.pth
 *.safetensors
