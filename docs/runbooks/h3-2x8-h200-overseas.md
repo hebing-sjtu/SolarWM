@@ -312,7 +312,9 @@ COPY . /opt/SolarWM
 
 RUN python -m pip install ".[train]"
 
-ENV TORCH_CUDA_ARCH_LIST=9.0 MAX_JOBS=8
+ENV TORCH_CUDA_ARCH_LIST=9.0 \
+    FLASH_ATTENTION_FORCE_BUILD=TRUE \
+    MAX_JOBS=8
 RUN python -m pip install --no-build-isolation flash-attn==2.8.3
 
 RUN python -c "import decord, diffusers, flash_attn, peft, torch, transformers"

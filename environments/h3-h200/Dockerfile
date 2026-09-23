@@ -20,6 +20,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/mnt/solar/cache/hf \
     TORCH_HOME=/mnt/solar/cache/torch \
     TORCH_CUDA_ARCH_LIST=9.0 \
+    FLASH_ATTENTION_FORCE_BUILD=TRUE \
     MAX_JOBS=${FLASH_ATTN_MAX_JOBS}
 
 RUN apt-get update \
