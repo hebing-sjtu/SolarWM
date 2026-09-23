@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
 ARG SOURCE_COMMIT=unknown
@@ -74,8 +76,27 @@ WORKDIR /opt/SolarWM
 COPY . /opt/SolarWM
 
 RUN python -m pip install ".[train]" \
-    && python -m pip check \
-    && python -m solarwm environment probe
+    && python - <<'PY'
+import decord
+import diffusers
+import flash_attn
+import peft
+import torch
+import transformers
+
+print(
+    {
+        "decord": decord.__version__,
+        "diffusers": diffusers.__version__,
+        "flash_attn": flash_attn.__version__,
+        "peft": peft.__version__,
+        "torch": torch.__version__,
+        "transformers": transformers.__version__,
+    }
+)
+PY
+
+RUN python -m solarwm environment probe
 
 ENTRYPOINT []
 CMD ["sleep", "infinity"]

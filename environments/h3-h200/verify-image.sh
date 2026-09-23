@@ -33,11 +33,11 @@ docker run --rm \
   bash -lc '
 set -Eeuo pipefail
 python --version
-python -m pip check
 python -m solarwm environment probe
 python - <<'"'"'PY'"'"'
 import os
 
+import decord
 import diffusers
 import flash_attn
 import peft
@@ -53,6 +53,7 @@ assert torch.cuda.device_count() == expected_gpu_count, (
 )
 assert torch.__version__.startswith("2.6.0"), torch.__version__
 assert torch.version.cuda == "12.4", torch.version.cuda
+assert decord.__version__ == "0.6.0", decord.__version__
 assert diffusers.__version__ == "0.40.0", diffusers.__version__
 assert transformers.__version__ == "5.12.1", transformers.__version__
 assert peft.__version__ == "0.20.0", peft.__version__

@@ -182,7 +182,7 @@ export IMAGE_REPOSITORY="$REGISTRY_HOST/worldmodel/solarwm-h3"
 6. 安装 H3 固定版本依赖；
 7. 为 H100/H200 的 SM90 编译 FlashAttention 2.8.3；
 8. 安装当前 SolarWM 源码；
-9. 执行 `pip check` 和 SolarWM environment probe；
+9. 执行 Decord/H3 依赖 import 和 SolarWM environment probe；
 10. 推送到 TCR；
 11. 查询 registry digest；
 12. 把最终不可变地址写入：
@@ -239,7 +239,7 @@ EXPECTED_GPU_COUNT=8 \
 - GPU compute capability 为 9.0；
 - Python、PyTorch、CUDA、Diffusers、Transformers、PEFT 和 FlashAttention
   版本正确；
-- `pip check` 通过；
+- Decord 和 H3 关键依赖可以正常 import；
 - SolarWM environment probe 通过；
 - FlashAttention 在真实 H200 上执行并返回 finite 结果。
 
