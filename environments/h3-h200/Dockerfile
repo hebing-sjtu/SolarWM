@@ -5,6 +5,7 @@ FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 ARG SOURCE_COMMIT=unknown
 ARG SOURCE_URL=https://github.com/Junchao-cs/SolarWM
 ARG FLASH_ATTN_MAX_JOBS=4
+ARG FLASH_ATTN_NVCC_THREADS=2
 
 LABEL org.opencontainers.image.title="SolarWM MiniMax-H3 H200 Runtime" \
       org.opencontainers.image.description="SolarWM H3 runtime for NVIDIA H100/H200 (SM90)" \
@@ -21,7 +22,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TORCH_HOME=/mnt/solar/cache/torch \
     TORCH_CUDA_ARCH_LIST=9.0 \
     FLASH_ATTENTION_FORCE_BUILD=TRUE \
-    MAX_JOBS=${FLASH_ATTN_MAX_JOBS}
+    MAX_JOBS=${FLASH_ATTN_MAX_JOBS} \
+    NVCC_THREADS=${FLASH_ATTN_NVCC_THREADS}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

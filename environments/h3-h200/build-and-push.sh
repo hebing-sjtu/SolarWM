@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$ROOT_DIR/environments/h3-h200/Dockerfile"
 BUILDER_NAME="${BUILDER_NAME:-solarwm-h3-builder}"
 FLASH_ATTN_MAX_JOBS="${FLASH_ATTN_MAX_JOBS:-4}"
+FLASH_ATTN_NVCC_THREADS="${FLASH_ATTN_NVCC_THREADS:-2}"
 
 if [[ -z "${IMAGE_REPOSITORY:-}" ]]; then
   cat >&2 <<'EOF'
@@ -79,6 +80,7 @@ Building and pushing:
   commit:   $SOURCE_COMMIT
   platform: linux/amd64
   flash jobs: $FLASH_ATTN_MAX_JOBS
+  nvcc threads: $FLASH_ATTN_NVCC_THREADS
   image:    $IMAGE
 EOF
 
@@ -91,6 +93,7 @@ docker buildx build \
   --build-arg "SOURCE_COMMIT=$SOURCE_COMMIT" \
   --build-arg "SOURCE_URL=$SOURCE_URL" \
   --build-arg "FLASH_ATTN_MAX_JOBS=$FLASH_ATTN_MAX_JOBS" \
+  --build-arg "FLASH_ATTN_NVCC_THREADS=$FLASH_ATTN_NVCC_THREADS" \
   --file "$DOCKERFILE" \
   --tag "$IMAGE" \
   "$ROOT_DIR"
