@@ -56,6 +56,49 @@ class H3Stage0p5Geometry:
 STABLE_STAGE0P5_GEOMETRY = H3Stage0p5Geometry()
 
 
+@dataclass(frozen=True)
+class H3ProxyStage0p5Geometry:
+    """The FastVideo-compatible 124-frame Ref2VA proxy profile."""
+
+    pixel_frames: int = 124
+    encoded_latents: int = 37
+    height: int = 768
+    width: int = 1344
+    latent_channels: int = 24
+    latent_height: int = 48
+    latent_width: int = 84
+    proxy_latent_height: int = 12
+    proxy_latent_width: int = 21
+    patch_size: tuple[int, int, int] = (1, 2, 2)
+
+    @property
+    def rows_per_latent(self) -> int:
+        _, patch_h, patch_w = self.patch_size
+        return (self.latent_height // patch_h) * (self.latent_width // patch_w)
+
+    @property
+    def target_rows(self) -> int:
+        return self.encoded_latents * self.rows_per_latent
+
+    @property
+    def proxy_rows_per_latent(self) -> int:
+        _, patch_h, patch_w = self.patch_size
+        padded_height = math.ceil(self.proxy_latent_height / patch_h) * patch_h
+        padded_width = math.ceil(self.proxy_latent_width / patch_w) * patch_w
+        return (padded_height // patch_h) * (padded_width // patch_w)
+
+    @property
+    def proxy_rows(self) -> int:
+        return self.encoded_latents * self.proxy_rows_per_latent
+
+    @property
+    def audio_latents(self) -> int:
+        return audio_latents_for_video(self.pixel_frames)
+
+
+PROXY_STAGE0P5_GEOMETRY = H3ProxyStage0p5Geometry()
+
+
 def align_pixel_frames(
     num_frames: int,
     geometry: H3Geometry = DEFAULT_GEOMETRY,
@@ -187,6 +230,50 @@ def validate_stage0p5_geometry(
     return observed
 
 
+def validate_proxy_stage0p5_geometry(
+    *,
+    pixel_frames: int,
+    encoded_latents: int,
+    height: int,
+    width: int,
+    latent_channels: int,
+    latent_height: int,
+    latent_width: int,
+    proxy_latent_height: int,
+    proxy_latent_width: int,
+) -> H3ProxyStage0p5Geometry:
+    """Validate the isolated 124f Ref2VA proxy profile."""
+
+    expected = PROXY_STAGE0P5_GEOMETRY
+    observed = H3ProxyStage0p5Geometry(
+        pixel_frames=int(pixel_frames),
+        encoded_latents=int(encoded_latents),
+        height=int(height),
+        width=int(width),
+        latent_channels=int(latent_channels),
+        latent_height=int(latent_height),
+        latent_width=int(latent_width),
+        proxy_latent_height=int(proxy_latent_height),
+        proxy_latent_width=int(proxy_latent_width),
+    )
+    if observed != expected:
+        raise ValueError(
+            "MiniMax-H3 Ref2VA proxy Stage0.5 supports only 124f -> 37 latents "
+            "at 768x1344 with [24,37,48,84] target and [24,37,12,21] proxy "
+            f"latents; got {observed}"
+        )
+    if pixel_frames_to_latent_frames(observed.pixel_frames) != observed.encoded_latents:
+        raise ValueError("proxy pixel/latent temporal geometry is internally inconsistent")
+    validate_canvas(observed.height, observed.width)
+    if observed.height // DEFAULT_GEOMETRY.vae_spatial_compression != observed.latent_height:
+        raise ValueError("proxy target height does not match VisualVAE compression")
+    if observed.width // DEFAULT_GEOMETRY.vae_spatial_compression != observed.latent_width:
+        raise ValueError("proxy target width does not match VisualVAE compression")
+    if observed.rows_per_latent != 1008 or observed.audio_latents != 207:
+        raise ValueError("proxy target token/audio geometry differs from the frozen profile")
+    return observed
+
+
 def spatial_position_axis(dim: int, patch: int, sqrt_area: float) -> np.ndarray:
     """Build the provider-compatible float64 endpoint-excluded spatial axis."""
 
@@ -259,8 +346,10 @@ def native_video_position_grid(
 
 __all__ = [
     "DEFAULT_GEOMETRY",
+    "PROXY_STAGE0P5_GEOMETRY",
     "STABLE_STAGE0P5_GEOMETRY",
     "H3Geometry",
+    "H3ProxyStage0p5Geometry",
     "H3Stage0p5Geometry",
     "align_pixel_frames",
     "audio_latents_for_video",
@@ -272,5 +361,6 @@ __all__ = [
     "spatial_position_axis",
     "temporal_position_grid",
     "validate_canvas",
+    "validate_proxy_stage0p5_geometry",
     "validate_stage0p5_geometry",
 ]

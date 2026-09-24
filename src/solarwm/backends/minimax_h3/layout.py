@@ -425,6 +425,7 @@ def build_row_timesteps(
     text_timestep: object | None = None,
     condition_video_timestep: float = 0.999,
     clean_video_timestep: float = 1.0,
+    num_fixed_video_rows: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return sorted distinct times and each row's index into that array."""
 
@@ -467,6 +468,15 @@ def build_row_timesteps(
     row_times[layout.audio_indices] = scalar(audio_timestep, "audio_timestep")
     row_times[layout.clean_video_indices] = scalar(clean_video_timestep, "clean_video_timestep")
     row_times[layout.noisy_video_indices] = noisy_values
+    if num_fixed_video_rows < 0 or num_fixed_video_rows > layout.noisy_video_indices.size:
+        raise ValueError(
+            f"num_fixed_video_rows={num_fixed_video_rows} is outside "
+            f"[0,{layout.noisy_video_indices.size}]"
+        )
+    if num_fixed_video_rows:
+        row_times[layout.noisy_video_indices[:num_fixed_video_rows]] = scalar(
+            condition_video_timestep, "condition_video_timestep"
+        )
     return np.unique(row_times, return_inverse=True)
 
 

@@ -11,7 +11,8 @@ from solarwm.errors import ConfigurationError
 
 from .camera import h3_fused_prope_contract
 from .codec import H3_PREENCODE_VERSION
-from .geometry import validate_stage0p5_geometry
+from .geometry import validate_proxy_stage0p5_geometry, validate_stage0p5_geometry
+from .proxy_artifacts import H3_PROXY_DATASET_NAME, H3_PROXY_PREENCODE_VERSION
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ def _nonempty_path(mapping: Mapping[str, Any], key: str, path: str) -> str:
 def _validate_model(
     model: Mapping[str, Any], *, action: str, input_mode: str, stage: str = "stage0p5"
 ) -> None:
+    proxy = input_mode == "proxy_preencoded"
     if "checkpoint_digest" in model:
         raise ConfigurationError(
             "model does not support removed content-digest fields: ['checkpoint_digest']"
@@ -103,13 +105,16 @@ def _validate_model(
         codec_identity = str(_required(model, "codec_identity", "model")).strip()
         if not codec_identity:
             raise ConfigurationError("model.codec_identity must be non-empty")
-    for key, expected in (
+    common_model = [
         ("architecture", "minimax-h3-33b"),
         ("torch_dtype", "bfloat16"),
-        ("camera_attention_mode", "fused_prope"),
-        ("camera_translation_transform", "logd4"),
-        ("camera_intrinsics_mode", "wan_fixed"),
-    ):
+        ("camera_attention_mode", "none" if proxy else "fused_prope"),
+        ("camera_translation_transform", "none" if proxy else "logd4"),
+        ("camera_intrinsics_mode", "none" if proxy else "wan_fixed"),
+    ]
+    if proxy:
+        common_model.append(("conditioning_mode", "ref2va_proxy"))
+    for key, expected in common_model:
         _equal(model, key, expected, "model")
     for key, expected in (
         ("attention_head_dim", 128),
@@ -127,35 +132,93 @@ def _validate_model(
         return
     for key, expected in (
         ("training_mode", "lora"),
-        ("transformer_subfolder", "transformer"),
+        ("transformer_subfolder", "transformer_ref" if proxy else "transformer"),
         ("transformer_device_map", None),
         ("attention_backend", "flex" if stage in {"stage1", "stage2"} else "flash"),
         ("load_conditioners", False),
     ):
         _equal(model, key, expected, "model")
     adapter = _mapping(model, "adapter")
-    for key, expected in (
-        ("type", "lora"),
-        ("target", "block_qkvo_ffn"),
-        ("rank", 384),
-        ("alpha", 384),
-        ("dropout", 0.0),
-        ("bias", "none"),
-        ("dtype", "bfloat16"),
-        ("expected_target_linear_modules", 312),
-        ("expected_trainable_parameters", 2_075_394_048),
-    ):
+    adapter_profile = (
+        (
+            ("type", "lora"),
+            ("target", "main_attention_qkvo"),
+            ("rank", 128),
+            ("alpha", 128),
+            ("dropout", 0.0),
+            ("bias", "none"),
+            ("dtype", "bfloat16"),
+            ("expected_target_linear_modules", 200),
+        )
+        if proxy
+        else (
+            ("type", "lora"),
+            ("target", "block_qkvo_ffn"),
+            ("rank", 384),
+            ("alpha", 384),
+            ("dropout", 0.0),
+            ("bias", "none"),
+            ("dtype", "bfloat16"),
+            ("expected_target_linear_modules", 312),
+            ("expected_trainable_parameters", 2_075_394_048),
+        )
+    )
+    for key, expected in adapter_profile:
         _equal(adapter, key, expected, "model.adapter")
 
 
 def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0p5") -> str:
     input_mode = str(_required(data, "input_mode", "data")).strip().lower()
-    allowed = {"raw"} if action == "preencode" else {"preencoded"}
+    allowed = {"raw"} if action == "preencode" else {"preencoded", "proxy_preencoded"}
     if input_mode not in allowed:
         raise ConfigurationError(
             f"MiniMax-H3 {action} data.input_mode must be one of {sorted(allowed)!r}; "
             f"got {input_mode!r}"
         )
+    if input_mode == "proxy_preencoded":
+        if action != "train" or stage != "stage0p5":
+            raise ConfigurationError("H3 proxy_preencoded data only supports Stage0.5 training")
+        for key, expected in (
+            ("dataset_name", H3_PROXY_DATASET_NAME),
+            ("preencode_version", H3_PROXY_PREENCODE_VERSION),
+            ("pixel_frames", 124),
+            ("encoded_latents", 37),
+            ("train_target_latents", 37),
+            ("height", 768),
+            ("width", 1344),
+            ("latent_channels", 24),
+            ("latent_height", 48),
+            ("latent_width", 84),
+            ("proxy_latent_height", 12),
+            ("proxy_latent_width", 21),
+            ("qwen_video_fps", 2),
+            ("anchor_short_edge", 2048),
+            ("align_proxy_reference_time", False),
+        ):
+            _equal(data, key, expected, "data")
+        cwm_system = str(_required(data, "cwm_system", "data")).strip().lower()
+        if cwm_system not in {"w0", "wn"}:
+            raise ConfigurationError("data.cwm_system must be w0 or wn")
+        expected_given = 1 if cwm_system == "w0" else 10
+        _equal(data, "num_given_latent_frames", expected_given, "data")
+        data_path = _nonempty_path(data, "data_path", "data")
+        if not data_path.startswith("/"):
+            raise ConfigurationError("data.data_path must be absolute")
+        workers = data.get("num_workers", 1)
+        if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+            raise ConfigurationError("data.num_workers must be a positive integer")
+        validate_proxy_stage0p5_geometry(
+            pixel_frames=int(data["pixel_frames"]),
+            encoded_latents=int(data["encoded_latents"]),
+            height=int(data["height"]),
+            width=int(data["width"]),
+            latent_channels=int(data["latent_channels"]),
+            latent_height=int(data["latent_height"]),
+            latent_width=int(data["latent_width"]),
+            proxy_latent_height=int(data["proxy_latent_height"]),
+            proxy_latent_width=int(data["proxy_latent_width"]),
+        )
+        return input_mode
     transport = _mapping(data, "transport")
     kind = str(_required(transport, "kind", "data.transport")).strip().lower()
     if kind not in {"local", "gcs"}:
@@ -280,6 +343,8 @@ def _validate_route(train: Mapping[str, Any]) -> None:
 def _validate_training(
     train: Mapping[str, Any],
     distributed: Mapping[str, Any],
+    *,
+    proxy: bool = False,
 ) -> None:
     stage = str(train["stage"])
     sgf = stage == "stage2"
@@ -296,11 +361,26 @@ def _validate_training(
     optimizer = _mapping(train, "optimizer")
     for key, expected in (
         ("name", "fp32_master_adamw"),
-        ("learning_rate", {"stage0p5": 1e-4, "stage1": 3e-5, "stage2": 2e-6}[stage]),
-        ("warmup_steps", {"stage0p5": 500, "stage1": 1000, "stage2": 0}[stage]),
+        (
+            "learning_rate",
+            2e-5 if proxy else {"stage0p5": 1e-4, "stage1": 3e-5, "stage2": 2e-6}[stage],
+        ),
+        (
+            "warmup_steps",
+            10 if proxy else {"stage0p5": 500, "stage1": 1000, "stage2": 0}[stage],
+        ),
     ):
         _equal(optimizer, key, expected, "train.optimizer")
-    if stage != "stage0p5":
+    if proxy:
+        for key, expected in (
+            ("betas", [0.9, 0.999]),
+            ("epsilon", 1e-8),
+            ("weight_decay", 0.01),
+            ("gradient_clip", 1.0),
+            ("min_lr_ratio", 0.05),
+        ):
+            _equal(optimizer, key, expected, "train.optimizer")
+    elif stage != "stage0p5":
         for key, expected in (
             ("betas", [0.0, 0.999] if sgf else [0.9, 0.95]),
             ("epsilon", 1e-8),
@@ -330,8 +410,9 @@ def _validate_training(
     _equal(distributed, "context_parallel_size", 1, "distributed")
     _equal(distributed, "sp_peers_share_sample", True, "distributed")
     _equal(distributed, "sp_peers_share_rng", True, "distributed")
-    if sequence_parallel != (4 if sgf else 2):
-        raise ConfigurationError(f"H3 {stage} requires sequence_parallel_size={4 if sgf else 2}")
+    expected_sp = 1 if proxy else (4 if sgf else 2)
+    if sequence_parallel != expected_sp:
+        raise ConfigurationError(f"H3 {stage} requires sequence_parallel_size={expected_sp}")
     if sgf:
         _equal(fsdp, "frozen_base_shard_size", 8, "train.fsdp")
     if world_size % sequence_parallel:
@@ -352,9 +433,17 @@ def _validate_training(
 
 
 def _validate_validation(
-    validation: Mapping[str, Any], *, action: str, stage: str = "stage0p5"
+    validation: Mapping[str, Any],
+    *,
+    action: str,
+    stage: str = "stage0p5",
+    proxy: bool = False,
 ) -> None:
     del action
+    if proxy:
+        _equal(validation, "validate_every_steps", 0, "validation")
+        _equal(validation, "smoke_step", 0, "validation")
+        return
     _positive_int(validation, "sample_count", "validation")
     for name in ("selection_seed", "noise_seed"):
         value = _required(validation, name, "validation")
@@ -484,9 +573,12 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
                         f"checkpoint.initialization.{role}",
                     )
 
-        _validate_validation(_mapping(config, "validation"), action=action, stage=stage)
+        proxy = input_mode == "proxy_preencoded"
+        _validate_validation(
+            _mapping(config, "validation"), action=action, stage=stage, proxy=proxy
+        )
         if action == "train":
-            _validate_training(train, _mapping(config, "distributed"))
+            _validate_training(train, _mapping(config, "distributed"), proxy=proxy)
             _validate_checkpoint(_mapping(config, "checkpoint"), stage=stage)
         else:
             _validate_inference_distributed(
@@ -506,15 +598,15 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
     return H3RunContract(
         action=action,
         stage=stage,
-        pixel_frames=158,
-        encoded_latents=47,
+        pixel_frames=124 if input_mode == "proxy_preencoded" else 158,
+        encoded_latents=37 if input_mode == "proxy_preencoded" else 47,
         sequence_parallel_size=(
             0
             if action == "preencode"
             else int(_mapping(config, "distributed")["sequence_parallel_size"])
         ),
-        adapter_rank=0 if action == "preencode" else 384,
-        camera_translation_transform="logd4",
+        adapter_rank=(0 if action == "preencode" else int(_mapping(model, "adapter")["rank"])),
+        camera_translation_transform=str(model["camera_translation_transform"]),
         data_input_mode=input_mode,
     )
 

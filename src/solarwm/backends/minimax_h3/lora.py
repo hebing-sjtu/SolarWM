@@ -21,6 +21,8 @@ H3_LORA_SUFFIXES = (
     "ff.net.0.proj",
     "ff.net.2",
 )
+H3_PROXY_LORA_TARGET_COUNT = 200
+H3_PROXY_LORA_SUFFIXES = H3_LORA_SUFFIXES[:4]
 
 
 def _indexed_prefixes(
@@ -44,7 +46,7 @@ def _indexed_prefixes(
     return tuple(found[index] for index in range(expected))
 
 
-def discover_h3_lora_targets(model: Any) -> tuple[str, ...]:
+def discover_h3_lora_targets(model: Any, *, target: str = "block_qkvo_ffn") -> tuple[str, ...]:
     """Discover and audit all 50 main + 2 refiner block QKVO/FFN linears."""
 
     try:
@@ -58,19 +60,28 @@ def discover_h3_lora_targets(model: Any) -> tuple[str, ...]:
         50,
         "MiniMax-H3 main transformer",
     )
-    refiner = _indexed_prefixes(
-        modules,
-        r"(?:.*\.)?token_refiner\.refiner_blocks\.(\d+)",
-        2,
-        "MiniMax-H3 token refiner",
-    )
-    blocks = main + refiner
+    if target == "main_attention_qkvo":
+        blocks = main
+        suffixes = H3_PROXY_LORA_SUFFIXES
+        expected_count = H3_PROXY_LORA_TARGET_COUNT
+    elif target == "block_qkvo_ffn":
+        refiner = _indexed_prefixes(
+            modules,
+            r"(?:.*\.)?token_refiner\.refiner_blocks\.(\d+)",
+            2,
+            "MiniMax-H3 token refiner",
+        )
+        blocks = main + refiner
+        suffixes = H3_LORA_SUFFIXES
+        expected_count = H3_LORA_TARGET_COUNT
+    else:
+        raise BackendContractError(f"unsupported H3 LoRA target profile {target!r}")
     for block in blocks:
         attention = modules.get(f"{block}.attn")
         if attention is None or getattr(attention, "fused_projections", None) is not False:
             raise BackendContractError(f"H3 LoRA requires split Q/K/V projections at {block!r}")
-    targets = tuple(sorted(f"{block}.{suffix}" for block in blocks for suffix in H3_LORA_SUFFIXES))
-    if len(targets) != H3_LORA_TARGET_COUNT or len(set(targets)) != len(targets):
+    targets = tuple(sorted(f"{block}.{suffix}" for block in blocks for suffix in suffixes))
+    if len(targets) != expected_count or len(set(targets)) != len(targets):
         raise AssertionError("internal H3 LoRA target-count error")
     invalid = [
         name
@@ -167,9 +178,13 @@ def inject_h3_lora(
 
     rank = int(adapter_cfg.get("rank", 0))
     alpha = int(adapter_cfg.get("alpha", 0))
-    if rank != 384 or alpha != 384:
-        raise BackendContractError("H3 adapter requires rank=alpha=384")
-    targets = discover_h3_lora_targets(model)
+    target_profile = str(adapter_cfg.get("target", "block_qkvo_ffn"))
+    expected_rank = 128 if target_profile == "main_attention_qkvo" else 384
+    if rank != expected_rank or alpha != expected_rank:
+        raise BackendContractError(
+            f"H3 {target_profile} adapter requires rank=alpha={expected_rank}"
+        )
+    targets = discover_h3_lora_targets(model, target=target_profile)
     configuration = peft.LoraConfig(
         r=rank,
         lora_alpha=alpha,
@@ -211,7 +226,12 @@ def inject_h3_lora(
     trainable = tuple(parameter for parameter in wrapped.parameters() if parameter.requires_grad)
     if {id(value) for value in trainable} != {id(value) for value in parameter_by_key.values()}:
         raise BackendContractError("all and only H3 LoRA parameters must be trainable")
-    if len(parameter_by_key) != 2 * H3_LORA_TARGET_COUNT:
+    expected_targets = int(adapter_cfg.get("expected_target_linear_modules", len(targets)))
+    if len(targets) != expected_targets:
+        raise BackendContractError(
+            f"H3 LoRA discovered {len(targets)} targets, expected {expected_targets}"
+        )
+    if len(parameter_by_key) != 2 * len(targets):
         raise BackendContractError("H3 LoRA must expose one A/B tensor pair per target")
     runtime = H3LoRARuntime(
         model=wrapped,
@@ -223,10 +243,10 @@ def inject_h3_lora(
         rank=rank,
         alpha=alpha,
     )
-    expected = int(adapter_cfg.get("expected_trainable_parameters", H3_LORA_TRAINABLE_PARAMETERS))
-    if runtime.parameter_count != expected:
+    expected = adapter_cfg.get("expected_trainable_parameters")
+    if expected is not None and runtime.parameter_count != int(expected):
         raise BackendContractError(
-            f"H3 LoRA trainable parameters={runtime.parameter_count:,}, expected={expected:,}"
+            f"H3 LoRA trainable parameters={runtime.parameter_count:,}, expected={int(expected):,}"
         )
     if any(parameter.dtype != torch.bfloat16 for parameter in runtime.parameters):
         raise BackendContractError("all H3 LoRA parameters must remain BF16")
@@ -237,6 +257,8 @@ __all__ = [
     "H3_LORA_SUFFIXES",
     "H3_LORA_TARGET_COUNT",
     "H3_LORA_TRAINABLE_PARAMETERS",
+    "H3_PROXY_LORA_SUFFIXES",
+    "H3_PROXY_LORA_TARGET_COUNT",
     "H3LoRARuntime",
     "discover_h3_lora_targets",
     "inject_h3_lora",

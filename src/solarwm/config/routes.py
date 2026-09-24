@@ -111,14 +111,27 @@ def validate_route(config: Mapping[str, Any]) -> Route:
             )
     elif route.family == "ltx25_video" and frames != 153:
         raise ConfigurationError("LTX-2.5 Stage0.5 requires 153 frames")
-    elif route.family == "minimax_h3" and frames != 158:
-        raise ConfigurationError("MiniMax-H3 Stage0.5 requires 158 frames")
+    elif route.family == "minimax_h3":
+        input_mode = str(data.get("input_mode", "")).strip().lower()
+        expected_frames = 124 if input_mode == "proxy_preencoded" else 158
+        if frames != expected_frames:
+            raise ConfigurationError(
+                f"MiniMax-H3 {input_mode or 'native'} requires {expected_frames} frames"
+            )
 
     transform = str(model_value(config, "camera_translation_transform", "linear")).lower()
-    if transform not in {"linear", "logd4"}:
-        raise ConfigurationError("camera_translation_transform must be linear or logd4")
-    if route.family == "minimax_h3" and transform != "logd4":
-        raise ConfigurationError("MiniMax-H3 requires logd4")
+    proxy_h3 = (
+        route.family == "minimax_h3"
+        and str(data.get("input_mode", "")).strip().lower() == "proxy_preencoded"
+    )
+    if proxy_h3:
+        if transform != "none":
+            raise ConfigurationError("MiniMax-H3 proxy conditioning requires no camera transform")
+    else:
+        if transform not in {"linear", "logd4"}:
+            raise ConfigurationError("camera_translation_transform must be linear or logd4")
+        if route.family == "minimax_h3" and transform != "logd4":
+            raise ConfigurationError("MiniMax-H3 requires logd4")
     return route
 
 

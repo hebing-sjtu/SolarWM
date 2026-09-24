@@ -65,7 +65,9 @@ from .artifacts import H3PreencodedStream, h3_silence_profile, load_silence_late
 from .distributed import get_sp_group, get_sp_rank, get_sp_size, sync_lora_gradients
 from .inference import camera_fingerprint, package_generated
 from .optional import load_conditioners, load_transformer, require_h3_runtime
+from .proxy_artifacts import H3ProxyPtStream
 from .stage0p5 import H3Stage0p5Core
+from .stage0p5_ref2va import H3Ref2VAStage0p5Core
 
 
 def _base_model_profile(model_cfg: Mapping[str, Any]) -> dict[str, Any]:
@@ -124,7 +126,7 @@ def _topology(*, sp_size: int, require_torchrun: bool) -> Topology:
     if required <= set(os.environ):
         return Topology.from_environ(sp_size)
     if require_torchrun:
-        raise BackendContractError("H3 SP2 training must be launched with torchrun rank variables")
+        raise BackendContractError("H3 distributed training requires torchrun rank variables")
     return Topology(1, 0, 1, 0, sp_size=1)
 
 
@@ -146,6 +148,12 @@ def _reader(
 
         return H3IndexedValidationStream(config, topology, frozen_ids=fixed_validation_sample_ids)
     data = config["data"]
+    if str(data.get("input_mode", "")).lower() == "proxy_preencoded":
+        if fixed_validation:
+            raise BackendContractError(
+                "H3 proxy validation is disabled; set validation intervals to zero"
+            )
+        return H3ProxyPtStream(config, topology)
     transport = data["transport"]
     common = {
         "root": str(transport["root"]),
@@ -242,9 +250,17 @@ def _checkpoint_contract(
     silence_profile: Mapping[str, Any],
     base_model: Mapping[str, Any],
     config: Mapping[str, Any] | None = None,
+    lora_trainable_parameters: int | None = None,
 ) -> CheckpointContract:
     train = config["train"] if config is not None else {}
+    model_cfg = config["model"] if config is not None else {}
+    data_cfg = config["data"] if config is not None else {}
+    distributed_cfg = config["distributed"] if config is not None else {}
     stage = str(train.get("stage", "stage0p5"))
+    adapter_cfg = model_cfg.get("adapter", {})
+    rank = int(adapter_cfg.get("rank", 384))
+    alpha = int(adapter_cfg.get("alpha", 384))
+    target_count = int(adapter_cfg.get("expected_target_linear_modules", 312))
     stage_extras = {}
     if stage != "stage0p5":
         stage_extras = {
@@ -265,16 +281,23 @@ def _checkpoint_contract(
         causal_mode=str(train.get("causal_mode", "bidirectional")),
         objective=str(train.get("objective", "flow_matching")),
         objective_variant="v1_5" if stage == "stage1" else "data_ward_velocity",
-        camera_translation_transform="logd4",
-        parameterization="peft-lora-r384-alpha384",
-        sp_size=4 if stage == "stage2" else 2,
-        data_generation="h3.158f.v1",
+        camera_translation_transform=str(model_cfg.get("camera_translation_transform", "logd4")),
+        parameterization=f"peft-lora-r{rank}-alpha{alpha}",
+        sp_size=int(distributed_cfg.get("sequence_parallel_size", 4 if stage == "stage2" else 2)),
+        data_generation=str(data_cfg.get("preencode_version", "h3.158f.v1")),
         extras={
             "encoder_profile": json.loads(json.dumps(dict(encoder_profile), sort_keys=True)),
             "silence_profile": json.loads(json.dumps(dict(silence_profile), sort_keys=True)),
             "base_model": json.loads(json.dumps(dict(base_model), sort_keys=True)),
-            "lora_target_count": 312,
-            "lora_trainable_parameters": 2_075_394_048,
+            "lora_target_count": target_count,
+            "lora_trainable_parameters": adapter_cfg.get(
+                "expected_trainable_parameters",
+                (
+                    int(lora_trainable_parameters)
+                    if lora_trainable_parameters is not None
+                    else 2_075_394_048
+                ),
+            ),
             "optimizer": "fp32_master_adamw",
             "ema": "rank_local_fp32_student_start39"
             if stage == "stage2"
@@ -551,11 +574,20 @@ class H3TrainingRuntime:
             )
         )
         self.reader = _reader(config, self.topology)
-        self.silence, silence_profile = load_silence_latents(
-            str(config["data"]["silence_latents_path"]),
-            pixel_frames=153 if self.stage == "stage1" else 158,
-        )
-        _assert_encoder_silence_identity(self.reader.encoder_profile, silence_profile)
+        self.proxy_mode = str(config["data"].get("input_mode", "")).lower() == "proxy_preencoded"
+        if self.proxy_mode:
+            self.silence = None
+            silence_profile = {
+                "schema": "solarwm.minimax-h3-proxy-audio.v1",
+                "policy": "cache-or-zero",
+                "audio_latents": 207,
+            }
+        else:
+            self.silence, silence_profile = load_silence_latents(
+                str(config["data"]["silence_latents_path"]),
+                pixel_frames=153 if self.stage == "stage1" else 158,
+            )
+            _assert_encoder_silence_identity(self.reader.encoder_profile, silence_profile)
         # Objective RNG advances continuously across microbatches and is
         # restored exactly by checkpoints.
         torch.manual_seed(self.objective_seed)
@@ -566,6 +598,7 @@ class H3TrainingRuntime:
             silence_profile=silence_profile,
             base_model=base_model,
             config=config,
+            lora_trainable_parameters=self.lora.parameter_count,
         )
         self._global_step = 0
         self._finite_clip_norm = finite_clip_norm
@@ -574,6 +607,8 @@ class H3TrainingRuntime:
             self.load_checkpoint(resume)
 
     def _make_core(self) -> Any:
+        if self.proxy_mode:
+            return H3Ref2VAStage0p5Core(self.model, self.device, self.config)
         if self.stage == "stage1":
             from .stage1 import H3Stage1Core
 

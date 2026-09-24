@@ -72,6 +72,59 @@ or Stage1 training, or `--set train.global_batch_size=4` with the same world-siz
 override for Stage2. These smaller runs change the global batch size; the
 unmodified configs retain the released recipes.
 
+### Ref2VA proxy Stage0.5 training
+
+**Ref2VA** means “reference-to-video-and-audio”: the transformer receives
+ordered visual references before the target rows. The proxy profile reads the
+existing FastVideo `.pt` cache directly; no WebDataset conversion is required.
+Its data contract is isolated from native `h3.158f.v1`:
+
+- 124 pixel frames become 37 target latents;
+- references are ordered as picture anchor, then video proxy;
+- target, proxy and anchor keys are `vae_latent`, `proxy_latent` and
+  `anchor_latent`;
+- `text_embedding`, `text_token_tags` and `info.cwm_system` must match the
+  cached CWM prompt role;
+- the `w0` role fixes one leading target latent; `wn` fixes ten;
+- camera conditioning and native camera validation are disabled.
+
+**LoRA** (low-rank adaptation) trains small matrices attached to frozen model
+layers. This profile starts fresh rank-128 LoRA matrices on the Q/K/V/output
+attention projections of the 50 main blocks (200 target linear layers) and
+loads the base model's `transformer_ref` partition.
+
+The checked-in example targets the active W0/Qwen-2-FPS cache:
+
+```bash
+cd /workspace/SolarWM
+export NNODES=2
+export NODE_RANK=0  # set to 1 on the second node
+export MASTER_ADDR=ip-or-hostname-of-node-0
+export MASTER_PORT=29500
+
+torchrun --nnodes="$NNODES" --node-rank="$NODE_RANK" --nproc-per-node=8 \
+  --rdzv-backend=c10d --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
+  -m solarwm train \
+  --config configs/examples/minimax_h3/stage0p5-124f-ref2va-proxy-sp1.yaml
+```
+
+`SP1` means sequence parallel size 1: each GPU processes a complete packed
+sequence. On 16 GPUs with micro-batch 1 and accumulation 1, the logical
+data-parallel and global batch sizes are both 16. The example keeps learning
+rate `2e-5`; it does not silently scale the rate from an earlier global batch.
+
+Edit or override these machine-specific paths before launch:
+
+```bash
+--set model.checkpoint_path=/data/models/MiniMax-H3
+--set data.data_path=/data/binghe/h3_proxy/cache/gta_v2_cwm_1344_qwen2_simple
+--set runtime.output_dir=/data/binghe/h3_proxy/solarwm-runs/gta-v2-w0-lora128
+```
+
+The current proxy route is training-only. Keep
+`validation.validate_every_steps=0` and `validation.smoke_step=0`; the native
+validation path expects 158-frame camera-conditioned samples.
+
 ## Stage1 / Stage2 setup
 
 For training across stages, download the three EMA packages from the

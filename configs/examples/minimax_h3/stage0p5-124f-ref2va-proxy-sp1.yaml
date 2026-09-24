@@ -1,0 +1,119 @@
+# MiniMax-H3 Ref2VA proxy Stage0.5 training on 2 nodes x 8 H200 GPUs.
+schema: solarwm.run.v1
+action: train
+name: minimax-h3-stage0p5-124f-ref2va-proxy-sp1
+
+model:
+  family: minimax_h3
+  architecture: minimax-h3-33b
+  checkpoint_path: /data/models/MiniMax-H3
+  transformer_subfolder: transformer_ref
+  transformer_device_map: null
+  training_mode: lora
+  conditioning_mode: ref2va_proxy
+  torch_dtype: bfloat16
+  load_conditioners: false
+  camera_attention_mode: none
+  attention_head_dim: 128
+  camera_prope_head_dim_start: 96
+  camera_prope_head_dim_end: 128
+  camera_translation_transform: none
+  camera_intrinsics_mode: none
+  latent_channels: 24
+  latent_height: 48
+  latent_width: 84
+  rows_per_latent: 1008
+  num_frames_per_block: 5
+  max_prior_clean_chunks: 5
+  attention_backend: flash
+  adapter:
+    type: lora
+    target: main_attention_qkvo
+    rank: 128
+    alpha: 128
+    dropout: 0.0
+    bias: none
+    dtype: bfloat16
+    expected_target_linear_modules: 200
+
+data:
+  input_mode: proxy_preencoded
+  format: fastvideo_pt
+  dataset_name: h3_proxy_pt
+  data_path: /data/binghe/h3_proxy/cache/gta_v2_cwm_1344_qwen2_simple
+  preencode_version: h3.ref2va-proxy.124f.v1
+  pixel_frames: 124
+  encoded_latents: 37
+  train_target_latents: 37
+  height: 768
+  width: 1344
+  latent_channels: 24
+  latent_height: 48
+  latent_width: 84
+  proxy_latent_height: 12
+  proxy_latent_width: 21
+  audio_latents: 207
+  qwen_video_fps: 2
+  cwm_system: w0
+  num_given_latent_frames: 1
+  align_proxy_reference_time: false
+  anchor_short_edge: 2048
+  seed: 42
+  num_workers: 1
+
+distributed:
+  world_size: 16
+  sequence_parallel_size: 1
+  context_parallel_size: 1
+  rank_partition: node_shard
+  sp_peers_share_sample: true
+  sp_peers_share_rng: true
+
+train:
+  stage: stage0p5
+  causal_mode: bidirectional
+  objective: flow_matching
+  precision: bfloat16
+  micro_batch_size: 1
+  gradient_accumulation_steps: 1
+  global_batch_size: 16
+  max_steps: 144
+  video_timestep_shift: 12.0
+  audio_timestep_shift: 3.0
+  keyframe_noise_augmentation: 0.999
+  audio_loss_weight: 0.0
+  optimizer:
+    name: fp32_master_adamw
+    learning_rate: 2.0e-5
+    betas: [0.9, 0.999]
+    epsilon: 1.0e-8
+    weight_decay: 0.01
+    gradient_clip: 1.0
+    warmup_steps: 10
+    min_lr_ratio: 0.05
+  fsdp:
+    sharding_strategy: FULL_SHARD
+    activation_checkpointing: true
+    preserve_checkpoint_dtype: true
+    param_dtype: null
+    reduce_dtype: float32
+    buffer_dtype: null
+
+# Native camera-conditioned validation is intentionally disabled for this profile.
+validation:
+  validate_every_steps: 0
+  smoke_step: 0
+
+checkpoint:
+  save_every_steps: 48
+  save_optimizer: true
+  ema:
+    enabled: true
+    dtype: float32
+    sharded: true
+    decay: 0.9999
+    start_step: 0
+    update_every_steps: 1
+
+runtime:
+  output_dir: /data/binghe/h3_proxy/solarwm-runs/gta-v2-w0-lora128
