@@ -125,6 +125,29 @@ The current proxy route is training-only. Keep
 `validation.validate_every_steps=0` and `validation.smoke_step=0`; the native
 validation path expects 158-frame camera-conditioned samples.
 
+The example enables rank-0 W&B scalar tracking. Install and authenticate once
+in the image before launching:
+
+```bash
+python -m pip install 'wandb>=0.18'
+wandb login
+```
+
+Only optimizer/checkpoint scalars are sent: loss, learning rate, gradient norm,
+step time, peak allocated memory and checkpoint boundaries. Media evaluation
+is deliberately not launched inside the distributed training process.
+`validation.manual_steps: [48, 96, 144]` records the intended standalone
+evaluation checkpoints; it does not start an evaluator. Run the external
+evaluator against those completed checkpoint directories and publish its media
+with the matching global step.
+
+Rank 0 persists the W&B run identity at
+`<runtime.output_dir>/wandb-run-id.txt`. A checkpoint resume using the same
+output directory reconnects to that run with `resume: allow`; the other 15
+ranks never initialize W&B. Set `runtime.tracking.entity` when the project
+belongs to a team account. `runtime.tracking.log_media` must remain `false` for
+this profile.
+
 ## Stage1 / Stage2 setup
 
 For training across stages, download the three EMA packages from the

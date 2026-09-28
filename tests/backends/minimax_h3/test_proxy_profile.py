@@ -13,7 +13,7 @@ from solarwm.backends.minimax_h3.lora import discover_h3_lora_targets
 from solarwm.backends.minimax_h3.proxy_artifacts import H3ProxyPtStream
 from solarwm.backends.minimax_h3.ref2va_layout import build_ref2va_proxy_layout
 from solarwm.config.routes import validate_route
-from solarwm.errors import DataContractError
+from solarwm.errors import ConfigurationError, DataContractError
 from solarwm.runtime import Topology
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -35,6 +35,18 @@ def test_proxy_example_resolves_to_isolated_sp1_contract() -> None:
     assert contract.sequence_parallel_size == 1
     assert contract.adapter_rank == 128
     assert contract.camera_translation_transform == "none"
+
+
+def test_proxy_tracking_is_scalar_only_and_evaluation_is_manual() -> None:
+    config = _proxy_config()
+    config["runtime"]["tracking"]["log_media"] = True
+    with pytest.raises(ConfigurationError, match="log_media"):
+        validate_h3_config(config)
+
+    config = _proxy_config()
+    config["validation"]["manual_steps"] = [96, 48]
+    with pytest.raises(ConfigurationError, match="sorted and unique"):
+        validate_h3_config(config)
 
 
 def test_proxy_geometry_is_frozen() -> None:

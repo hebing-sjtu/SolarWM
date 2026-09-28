@@ -443,6 +443,26 @@ def _validate_validation(
     if proxy:
         _equal(validation, "validate_every_steps", 0, "validation")
         _equal(validation, "smoke_step", 0, "validation")
+        _equal(
+            validation,
+            "media_evaluation",
+            "manual_checkpoint_steps",
+            "validation",
+        )
+        manual_steps = _required(validation, "manual_steps", "validation")
+        if (
+            not isinstance(manual_steps, list)
+            or not manual_steps
+            or any(
+                isinstance(step, bool) or not isinstance(step, int) or step < 1
+                for step in manual_steps
+            )
+        ):
+            raise ConfigurationError(
+                "validation.manual_steps must be a non-empty list of positive integers"
+            )
+        if manual_steps != sorted(set(manual_steps)):
+            raise ConfigurationError("validation.manual_steps must be sorted and unique")
         return
     _positive_int(validation, "sample_count", "validation")
     for name in ("selection_seed", "noise_seed"):
@@ -476,6 +496,32 @@ def _validate_checkpoint(checkpoint: Mapping[str, Any], *, stage: str = "stage0p
         ("update_every_steps", 1),
     ):
         _equal(ema, key, expected, "checkpoint.ema")
+
+
+def _validate_tracking(runtime: Mapping[str, Any]) -> None:
+    value = runtime.get("tracking")
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise ConfigurationError("runtime.tracking must be a mapping")
+    _equal(value, "enabled", True, "runtime.tracking")
+    _equal(value, "provider", "wandb", "runtime.tracking")
+    _equal(value, "mode", "online", "runtime.tracking")
+    _equal(value, "resume", "allow", "runtime.tracking")
+    _equal(value, "log_media", False, "runtime.tracking")
+    for key in ("project", "run_name"):
+        text = _required(value, key, "runtime.tracking")
+        if not isinstance(text, str) or not text.strip():
+            raise ConfigurationError(f"runtime.tracking.{key} must be a non-empty string")
+    for key in ("entity", "group", "run_id"):
+        text = value.get(key)
+        if text is not None and (not isinstance(text, str) or not text.strip()):
+            raise ConfigurationError(f"runtime.tracking.{key} must be null or a non-empty string")
+    tags = value.get("tags", [])
+    if not isinstance(tags, list) or any(
+        not isinstance(tag, str) or not tag.strip() for tag in tags
+    ):
+        raise ConfigurationError("runtime.tracking.tags must be a list of non-empty strings")
 
 
 def _validate_inference_distributed(
@@ -579,7 +625,23 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
         )
         if action == "train":
             _validate_training(train, _mapping(config, "distributed"), proxy=proxy)
-            _validate_checkpoint(_mapping(config, "checkpoint"), stage=stage)
+            checkpoint = _mapping(config, "checkpoint")
+            _validate_checkpoint(checkpoint, stage=stage)
+            if proxy:
+                maximum = int(train["max_steps"])
+                save_every = int(checkpoint.get("save_every_steps", 0))
+                save_steps = {int(step) for step in checkpoint.get("save_steps", ())}
+                for step in _mapping(config, "validation")["manual_steps"]:
+                    if int(step) > maximum:
+                        raise ConfigurationError(
+                            f"validation manual step {step} exceeds train.max_steps={maximum}"
+                        )
+                    if int(step) not in save_steps and not (
+                        save_every and int(step) % save_every == 0
+                    ):
+                        raise ConfigurationError(
+                            f"validation manual step {step} has no scheduled checkpoint"
+                        )
         else:
             _validate_inference_distributed(
                 _mapping(config, "distributed"), stage=stage, full_length=full_length
@@ -592,6 +654,7 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
 
     runtime = _mapping(config, "runtime")
     _nonempty_path(runtime, "output_dir", "runtime")
+    _validate_tracking(runtime)
     contract = h3_fused_prope_contract()
     if contract["camera_prope_head_slice"] != [96, 128]:
         raise ConfigurationError("internal H3 camera suffix contract is inconsistent")

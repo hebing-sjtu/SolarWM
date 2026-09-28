@@ -59,6 +59,7 @@ from solarwm.training import (
     MicrobatchResult,
     StepPolicy,
     TrainingEngine,
+    WandbEventSink,
 )
 
 from .artifacts import H3PreencodedStream, h3_silence_profile, load_silence_latents
@@ -1310,6 +1311,18 @@ def run_training(config: Mapping[str, Any]) -> int:
         if runtime.is_main
         else None
     )
+    tracking = config["runtime"].get("tracking", {})
+    wandb_writer = (
+        WandbEventSink(
+            tracking,
+            output_dir=str(config["runtime"]["output_dir"]),
+            resolved_config=config,
+        )
+        if runtime.is_main
+        and isinstance(tracking, Mapping)
+        and bool(tracking.get("enabled", False))
+        else None
+    )
 
     def sink(event: Mapping[str, Any]) -> None:
         if writer is None:
@@ -1330,11 +1343,15 @@ def run_training(config: Mapping[str, Any]) -> int:
                 flush=True,
             )
         writer(event)
+        if wandb_writer is not None:
+            wandb_writer(event)
 
     try:
         TrainingEngine(runtime, policy, event_sink=sink).run()
     finally:
         runtime.reader.close()
+        if wandb_writer is not None:
+            wandb_writer.finish()
     return 0
 
 

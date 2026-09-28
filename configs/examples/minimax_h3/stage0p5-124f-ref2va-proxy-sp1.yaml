@@ -103,6 +103,8 @@ train:
 validation:
   validate_every_steps: 0
   smoke_step: 0
+  media_evaluation: manual_checkpoint_steps
+  manual_steps: [48, 96, 144]
 
 checkpoint:
   save_every_steps: 48
@@ -117,3 +119,15 @@ checkpoint:
 
 runtime:
   output_dir: /data/binghe/h3_proxy/solarwm-runs/gta-v2-w0-lora128
+  tracking:
+    enabled: true
+    provider: wandb
+    mode: online
+    project: solarwm-h3-proxy
+    entity: null
+    run_name: gta-v2-qwen2-simple-w0-lora128
+    group: gta-v2-qwen2
+    tags: [minimax-h3, ref2va, proxy, w0, qwen2fps, lora128]
+    run_id: null
+    resume: allow
+    log_media: false

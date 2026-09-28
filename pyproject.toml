@@ -38,6 +38,9 @@ h3 = [
   "imageio==2.37.4",
   "imageio-ffmpeg==0.6.0",
 ]
+tracking = [
+  "wandb>=0.18",
+]
 ltx = [
   # The official ltx_core and ltx_pipelines modules are installed from LTX-2.
   "peft",

@@ -9,6 +9,7 @@ from .engine import (
     TrainingEngine,
     TrainingRuntime,
 )
+from .wandb_sink import WandbEventSink
 
 __all__ = [
     "BatchIdentity",
@@ -18,4 +19,5 @@ __all__ = [
     "StepPolicy",
     "TrainingEngine",
     "TrainingRuntime",
+    "WandbEventSink",
 ]
