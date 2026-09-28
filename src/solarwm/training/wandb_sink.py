@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ def _optional_text(config: Mapping[str, Any], key: str) -> str | None:
     return text or None
 
 
-def _run_id(config: Mapping[str, Any], output_dir: Path, wandb: Any) -> str:
+def _run_id(config: Mapping[str, Any], output_dir: Path) -> str:
     """Resolve one stable W&B identity across checkpoint resumes."""
 
     path = output_dir / "wandb-run-id.txt"
@@ -33,7 +34,7 @@ def _run_id(config: Mapping[str, Any], output_dir: Path, wandb: Any) -> str:
                 f"configured W&B run_id={configured!r} differs from persisted {persisted!r}"
             ) from None
         return persisted
-    selected = configured or str(wandb.util.generate_id())
+    selected = configured or secrets.token_hex(4)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -76,7 +77,7 @@ class WandbEventSink:
         self.wandb = wandb_module
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.run_id = _run_id(tracking, self.output_dir, self.wandb)
+        self.run_id = _run_id(tracking, self.output_dir)
         tags = [str(value) for value in tracking.get("tags", ())]
         kwargs: dict[str, Any] = {
             "project": str(tracking["project"]),

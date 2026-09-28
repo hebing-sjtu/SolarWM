@@ -22,15 +22,7 @@ class FakeRun:
         self.finished = True
 
 
-class FakeUtil:
-    @staticmethod
-    def generate_id() -> str:
-        return "generated-run-id"
-
-
 class FakeWandb:
-    util = FakeUtil()
-
     def __init__(self) -> None:
         self.init_calls: list[dict[str, Any]] = []
         self.runs: list[FakeRun] = []
@@ -56,7 +48,13 @@ def _tracking(**values: Any) -> dict[str, Any]:
     }
 
 
-def test_wandb_sink_maps_optimizer_and_checkpoint_events(tmp_path: Path) -> None:
+def test_wandb_sink_maps_optimizer_and_checkpoint_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "solarwm.training.wandb_sink.secrets.token_hex",
+        lambda _bytes: "generated-run-id",
+    )
     wandb = FakeWandb()
     sink = WandbEventSink(
         _tracking(),
@@ -100,7 +98,13 @@ def test_wandb_sink_maps_optimizer_and_checkpoint_events(tmp_path: Path) -> None
     assert wandb.runs[0].finished
 
 
-def test_wandb_sink_reuses_run_id_and_rejects_conflict(tmp_path: Path) -> None:
+def test_wandb_sink_reuses_run_id_and_rejects_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "solarwm.training.wandb_sink.secrets.token_hex",
+        lambda _bytes: "generated-run-id",
+    )
     wandb = FakeWandb()
     first = WandbEventSink(
         _tracking(),
