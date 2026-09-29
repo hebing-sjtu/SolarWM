@@ -44,6 +44,11 @@ def test_proxy_tracking_is_scalar_only_and_evaluation_is_manual() -> None:
         validate_h3_config(config)
 
     config = _proxy_config()
+    config["runtime"]["tracking"]["loss_ema_beta"] = 1.0
+    with pytest.raises(ConfigurationError, match="loss_ema_beta"):
+        validate_h3_config(config)
+
+    config = _proxy_config()
     config["validation"]["manual_steps"] = [96, 48]
     with pytest.raises(ConfigurationError, match="sorted and unique"):
         validate_h3_config(config)

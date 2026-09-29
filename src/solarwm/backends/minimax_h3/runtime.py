@@ -63,7 +63,14 @@ from solarwm.training import (
 )
 
 from .artifacts import H3PreencodedStream, h3_silence_profile, load_silence_latents
-from .distributed import get_sp_group, get_sp_rank, get_sp_size, sync_lora_gradients
+from .distributed import (
+    get_dp_group,
+    get_dp_world_size,
+    get_sp_group,
+    get_sp_rank,
+    get_sp_size,
+    sync_lora_gradients,
+)
 from .inference import camera_fingerprint, package_generated
 from .optional import load_conditioners, load_transformer, require_h3_runtime
 from .proxy_artifacts import H3ProxyPtStream
@@ -676,7 +683,11 @@ class H3TrainingRuntime:
             if not bool(self.torch.isfinite(loss).item()):
                 raise FloatingPointError(f"H3 {self.stage} loss is non-finite")
             (loss / (int(grad_accum) * get_sp_size())).backward()
-        loss_value = float(loss.item())
+        logged_loss = loss.detach().float().clone()
+        if self.dist.is_initialized() and get_dp_world_size() > 1:
+            self.dist.all_reduce(logged_loss, group=get_dp_group())
+            logged_loss.div_(get_dp_world_size())
+        loss_value = float(logged_loss.item())
         return MicrobatchResult(
             identity=identity, losses={str(self.train_cfg["objective"]): loss_value}
         )

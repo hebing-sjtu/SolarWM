@@ -522,6 +522,12 @@ def _validate_tracking(runtime: Mapping[str, Any]) -> None:
         not isinstance(tag, str) or not tag.strip() for tag in tags
     ):
         raise ConfigurationError("runtime.tracking.tags must be a list of non-empty strings")
+    beta_value = value.get("loss_ema_beta", 0.95)
+    if isinstance(beta_value, bool) or not isinstance(beta_value, (int, float)):
+        raise ConfigurationError("runtime.tracking.loss_ema_beta must be numeric")
+    beta = float(beta_value)
+    if not 0.0 < beta < 1.0:
+        raise ConfigurationError("runtime.tracking.loss_ema_beta must be between 0 and 1")
 
 
 def _validate_inference_distributed(

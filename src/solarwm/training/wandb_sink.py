@@ -78,6 +78,8 @@ class WandbEventSink:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.run_id = _run_id(tracking, self.output_dir)
+        self.loss_ema_beta = float(tracking.get("loss_ema_beta", 0.95))
+        self._loss_ema: dict[str, float] = {}
         tags = [str(value) for value in tracking.get("tags", ())]
         kwargs: dict[str, Any] = {
             "project": str(tracking["project"]),
@@ -105,7 +107,17 @@ class WandbEventSink:
             losses = event.get("losses", {})
             if not isinstance(losses, Mapping):
                 raise BackendContractError("W&B optimizer event losses must be a mapping")
-            metrics.update({f"train/loss/{key}": float(value) for key, value in losses.items()})
+            for key, value in losses.items():
+                scalar = float(value)
+                previous = self._loss_ema.get(str(key))
+                smoothed = (
+                    scalar
+                    if previous is None
+                    else self.loss_ema_beta * previous + (1.0 - self.loss_ema_beta) * scalar
+                )
+                self._loss_ema[str(key)] = smoothed
+                metrics[f"train/loss/{key}"] = scalar
+                metrics[f"train/loss_ema/{key}"] = smoothed
             for source, destination in (
                 ("lr", "train/learning_rate"),
                 ("gradient_norm", "train/gradient_norm"),

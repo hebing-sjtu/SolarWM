@@ -134,8 +134,12 @@ wandb login
 ```
 
 Only optimizer/checkpoint scalars are sent: loss, learning rate, gradient norm,
-step time, peak allocated memory and checkpoint boundaries. Media evaluation
-is deliberately not launched inside the distributed training process.
+step time, peak allocated memory and checkpoint boundaries. `train/loss/*` is
+the mean across the logical data-parallel group, while `train/loss_ema/*` is
+its exponential moving average (EMA), controlled by
+`runtime.tracking.loss_ema_beta` (default `0.95`). The EMA state starts again
+when the training process restarts. Media evaluation is deliberately not
+launched inside the distributed training process.
 `validation.manual_steps: [48, 96, 144]` records the intended standalone
 evaluation checkpoints; it does not start an evaluator. Run the external
 evaluator against those completed checkpoint directories and publish its media

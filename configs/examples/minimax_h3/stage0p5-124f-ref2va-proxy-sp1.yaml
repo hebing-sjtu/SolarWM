@@ -131,3 +131,4 @@ runtime:
     run_id: null
     resume: allow
     log_media: false
+    loss_ema_beta: 0.95

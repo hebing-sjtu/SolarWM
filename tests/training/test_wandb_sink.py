@@ -57,7 +57,7 @@ def test_wandb_sink_maps_optimizer_and_checkpoint_events(
     )
     wandb = FakeWandb()
     sink = WandbEventSink(
-        _tracking(),
+        _tracking(loss_ema_beta=0.5),
         output_dir=tmp_path,
         resolved_config={"schema": "solarwm.run.v1", "name": "test"},
         wandb_module=wandb,
@@ -75,6 +75,13 @@ def test_wandb_sink_maps_optimizer_and_checkpoint_events(
     )
     sink(
         {
+            "event": "optimizer_step",
+            "step": 4,
+            "losses": {"flow_matching": 0.5},
+        }
+    )
+    sink(
+        {
             "event": "checkpoint",
             "step": 48,
             "checkpoint_id": "checkpoint_model_000048",
@@ -88,10 +95,18 @@ def test_wandb_sink_maps_optimizer_and_checkpoint_events(
         3,
         {
             "train/loss/flow_matching": 0.25,
+            "train/loss_ema/flow_matching": 0.25,
             "train/learning_rate": 2e-5,
             "train/gradient_norm": 1.5,
             "perf/compute_time_s": 12.0,
             "perf/peak_allocated_gib": 80.0,
+        },
+    )
+    assert wandb.runs[0].logged[1] == (
+        4,
+        {
+            "train/loss/flow_matching": 0.5,
+            "train/loss_ema/flow_matching": 0.375,
         },
     )
     assert wandb.runs[0].summary["checkpoint/last_step"] == 48
