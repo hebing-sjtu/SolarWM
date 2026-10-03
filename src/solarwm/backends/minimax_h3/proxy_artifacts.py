@@ -118,10 +118,16 @@ class H3ProxyPtStream:
 
     state_schema = "solarwm.minimax-h3-proxy-pt-reader.v1"
 
-    def __init__(self, config: Mapping[str, Any], topology: Topology) -> None:
+    def __init__(
+        self,
+        config: Mapping[str, Any],
+        topology: Topology,
+        *,
+        selection_seed: int | None = None,
+    ) -> None:
         data = config["data"]
         self.topology = topology
-        self.seed = int(data.get("seed", 42))
+        self.seed = int(data.get("seed", 42) if selection_seed is None else selection_seed)
         self.paths = _sample_paths(str(data["data_path"]))
         self.expected_role = str(data["cwm_system"]).strip().lower()
         self.expected_qwen_fps = float(data["qwen_video_fps"])

@@ -176,8 +176,10 @@ def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0
             f"got {input_mode!r}"
         )
     if input_mode == "proxy_preencoded":
-        if action != "train" or stage != "stage0p5":
-            raise ConfigurationError("H3 proxy_preencoded data only supports Stage0.5 training")
+        if action not in {"train", "infer"} or stage != "stage0p5":
+            raise ConfigurationError(
+                "H3 proxy_preencoded data only supports Stage0.5 training or inference"
+            )
         for key, expected in (
             ("dataset_name", H3_PROXY_DATASET_NAME),
             ("preencode_version", H3_PROXY_PREENCODE_VERSION),
@@ -439,8 +441,22 @@ def _validate_validation(
     stage: str = "stage0p5",
     proxy: bool = False,
 ) -> None:
-    del action
     if proxy:
+        if action == "infer":
+            _positive_int(validation, "sample_count", "validation")
+            for name in ("selection_seed", "noise_seed"):
+                value = _required(validation, name, "validation")
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ConfigurationError(f"validation.{name} must be a non-negative integer")
+            for key, expected in (
+                ("pixel_frames", 124),
+                ("latent_frames", 37),
+                ("fps", 24),
+                ("num_inference_steps", 30),
+                ("passes", ["ema"]),
+            ):
+                _equal(validation, key, expected, "validation")
+            return
         _equal(validation, "validate_every_steps", 0, "validation")
         _equal(validation, "smoke_step", 0, "validation")
         _equal(
@@ -498,7 +514,7 @@ def _validate_checkpoint(checkpoint: Mapping[str, Any], *, stage: str = "stage0p
         _equal(ema, key, expected, "checkpoint.ema")
 
 
-def _validate_tracking(runtime: Mapping[str, Any]) -> None:
+def _validate_tracking(runtime: Mapping[str, Any], *, allow_media: bool = False) -> None:
     value = runtime.get("tracking")
     if value is None:
         return
@@ -508,7 +524,13 @@ def _validate_tracking(runtime: Mapping[str, Any]) -> None:
     _equal(value, "provider", "wandb", "runtime.tracking")
     _equal(value, "mode", "online", "runtime.tracking")
     _equal(value, "resume", "allow", "runtime.tracking")
-    _equal(value, "log_media", False, "runtime.tracking")
+    log_media = value.get("log_media")
+    if not isinstance(log_media, bool):
+        raise ConfigurationError("runtime.tracking.log_media must be true or false")
+    if log_media and not allow_media:
+        raise ConfigurationError(
+            "runtime.tracking.log_media is only supported by standalone proxy inference"
+        )
     for key in ("project", "run_name"):
         text = _required(value, key, "runtime.tracking")
         if not isinstance(text, str) or not text.strip():
@@ -531,7 +553,11 @@ def _validate_tracking(runtime: Mapping[str, Any]) -> None:
 
 
 def _validate_inference_distributed(
-    distributed: Mapping[str, Any], *, stage: str = "stage0p5", full_length: bool = False
+    distributed: Mapping[str, Any],
+    *,
+    stage: str = "stage0p5",
+    full_length: bool = False,
+    proxy: bool = False,
 ) -> None:
     world_size = _positive_int(distributed, "world_size", "distributed")
     sequence_parallel = _positive_int(
@@ -539,9 +565,11 @@ def _validate_inference_distributed(
         "sequence_parallel_size",
         "distributed",
     )
-    expected_sp = 8 if full_length else (4 if stage == "stage2" else 2)
+    expected_sp = 8 if proxy or full_length else (4 if stage == "stage2" else 2)
     if full_length and world_size != 8:
         raise ConfigurationError("Source-length H3 inference requires one eight-GPU SP8 worker")
+    if proxy and world_size != 8:
+        raise ConfigurationError("H3 proxy inference requires one eight-GPU SP8 worker")
     if sequence_parallel != expected_sp or world_size % sequence_parallel:
         raise ConfigurationError(f"H3 inference requires a world divisible by SP{expected_sp}")
     for key, expected in (
@@ -650,9 +678,24 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
                         )
         else:
             _validate_inference_distributed(
-                _mapping(config, "distributed"), stage=stage, full_length=full_length
+                _mapping(config, "distributed"),
+                stage=stage,
+                full_length=full_length,
+                proxy=proxy,
             )
-            _nonempty_path(_mapping(config, "checkpoint"), "resume_from", "checkpoint")
+            checkpoint = _mapping(config, "checkpoint")
+            if proxy:
+                resume = checkpoint.get("resume_from")
+                if resume is not None and (not isinstance(resume, str) or not resume.strip()):
+                    raise ConfigurationError(
+                        "checkpoint.resume_from must be null or a non-empty path"
+                    )
+                if checkpoint.get("weight_source") not in {"live", "ema"}:
+                    raise ConfigurationError(
+                        "H3 proxy inference checkpoint.weight_source must be live or ema"
+                    )
+            else:
+                _nonempty_path(checkpoint, "resume_from", "checkpoint")
     else:
         preencode = _mapping(config, "preencode")
         _equal(preencode, "codec_protocol", "solarwm.minimax_h3.codec.v1", "preencode")
@@ -660,7 +703,7 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
 
     runtime = _mapping(config, "runtime")
     _nonempty_path(runtime, "output_dir", "runtime")
-    _validate_tracking(runtime)
+    _validate_tracking(runtime, allow_media=action == "infer" and input_mode == "proxy_preencoded")
     contract = h3_fused_prope_contract()
     if contract["camera_prope_head_slice"] != [96, 128]:
         raise ConfigurationError("internal H3 camera suffix contract is inconsistent")

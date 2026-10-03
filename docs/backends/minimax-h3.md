@@ -121,9 +121,9 @@ Edit or override these machine-specific paths before launch:
 --set runtime.output_dir=/data/binghe/h3_proxy/solarwm-runs/gta-v2-w0-lora128
 ```
 
-The current proxy route is training-only. Keep
-`validation.validate_every_steps=0` and `validation.smoke_step=0`; the native
-validation path expects 158-frame camera-conditioned samples.
+Keep `validation.validate_every_steps=0` and `validation.smoke_step=0` during
+proxy training. Proxy visualization is a separate one-node inference job, so
+it cannot stall or exhaust memory in the distributed training process.
 
 The example enables rank-0 W&B scalar tracking. Install and authenticate once
 in the image before launching:
@@ -253,6 +253,37 @@ torchrun --standalone --nproc-per-node=8 -m solarwm infer \
   --set data.encoder_contract_path="$H3_SUPPORT/encoder_contract.json" \
   --set runtime.output_dir="$SOLAR_OUTPUT_ROOT/h3-stage0p5-158f-infer"
 ```
+
+### Ref2VA proxy cached-sample visualization
+
+`infer-stage0p5-124f-ref2va-proxy-sp8.yaml` evaluates one checkpoint on one
+8-GPU node. It selects deterministic samples from the existing pre-encoded
+`.pt` cache, so all checkpoints use identical text, anchor, proxy, and target
+tensors. This is a cached training-sample sanity evaluation, not a held-out
+evaluation: this path does not re-encode raw validation JSON or media.
+
+```bash
+unset PET_NNODES PET_NPROC_PER_NODE PET_NODE_RANK PET_MASTER_ADDR PET_MASTER_PORT
+
+torchrun --standalone --nproc-per-node=8 -m solarwm infer \
+  --config configs/examples/minimax_h3/infer-stage0p5-124f-ref2va-proxy-sp8.yaml \
+  --set checkpoint.resume_from=/data/binghe/h3_proxy/solarwm-runs/gta-v2-w0-lora128-3000-v3/checkpoint_model_000500 \
+  --set checkpoint.weight_source=ema \
+  --set runtime.output_dir=/data/binghe/h3_proxy/evals/solarwm-native/step-500 \
+  --set runtime.tracking.run_name=step-500
+```
+
+Use `checkpoint_model_001000` and `checkpoint_model_003000` with matching
+output directories for the other trained checkpoints. For the untrained base
+model, pass `--set checkpoint.resume_from=null` and use a `step-0` output
+directory.
+
+Each sample directory contains `proxy.mp4`, `generated.mp4`, `target.mp4`, and
+`compare.mp4`. The comparison panel is ordered
+`proxy | prediction | target`. Successful completion publishes
+`proxy-inference/COMPLETE.json`. Rank 0 also uploads each comparison video to
+the configured W&B project; set `runtime.tracking.entity` if the project
+belongs to a team account.
 
 ### Stage2 SGF
 

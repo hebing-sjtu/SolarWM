@@ -18,6 +18,7 @@ from solarwm.runtime import Topology
 
 ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE = ROOT / "configs/examples/minimax_h3/stage0p5-124f-ref2va-proxy-sp1.yaml"
+INFER_EXAMPLE = ROOT / "configs/examples/minimax_h3/infer-stage0p5-124f-ref2va-proxy-sp8.yaml"
 
 
 def _proxy_config(data_path: Path | None = None) -> dict[str, object]:
@@ -35,6 +36,21 @@ def test_proxy_example_resolves_to_isolated_sp1_contract() -> None:
     assert contract.sequence_parallel_size == 1
     assert contract.adapter_rank == 128
     assert contract.camera_translation_transform == "none"
+
+
+def test_proxy_inference_example_uses_one_sp8_worker_and_allows_base_baseline() -> None:
+    config = yaml.safe_load(INFER_EXAMPLE.read_text(encoding="utf-8"))
+    contract = validate_h3_config(config)
+    assert contract.action == "infer"
+    assert contract.sequence_parallel_size == 8
+    assert (contract.pixel_frames, contract.encoded_latents) == (124, 37)
+
+    config["checkpoint"]["resume_from"] = None
+    validate_h3_config(config)
+
+    config["distributed"]["sequence_parallel_size"] = 1
+    with pytest.raises(ConfigurationError, match="SP8"):
+        validate_h3_config(config)
 
 
 def test_proxy_tracking_is_scalar_only_and_evaluation_is_manual() -> None:
@@ -172,3 +188,56 @@ def test_proxy_lora_discovers_only_main_attention_qkvo() -> None:
     assert len(targets) == 200
     assert all(".attn." in name for name in targets)
     assert not any("ff." in name or "refiner" in name for name in targets)
+
+
+def test_proxy_ema_loader_canonicalizes_fsdp_and_adapter_prefixes(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+
+    from solarwm.backends.minimax_h3.proxy_weights import load_proxy_checkpoint
+    from solarwm.checkpoint import CheckpointContract, CheckpointTransaction
+
+    target = tmp_path / "checkpoint_model_000500"
+    canonical_key = "base_model.model.block.attn.to_q.lora_B.weight"
+    saved_key = "base_model.model._fsdp_wrapped_module.block.attn.to_q.lora_B.default.weight"
+    with CheckpointTransaction(target) as transaction:
+        torch.save(
+            {
+                "schema": "solarwm.minimax-h3-ema.v1",
+                "decay": 0.9999,
+                "num_updates": 500,
+                "trainable_only": True,
+                "shadow": {saved_key: torch.full((2, 2), 1.25, dtype=torch.float32)},
+            },
+            transaction.path / "ema.pt",
+        )
+        transaction.commit(
+            step=500,
+            contract=CheckpointContract(
+                family="minimax_h3",
+                stage="stage0p5",
+                causal_mode="bidirectional",
+                objective="flow_matching",
+                objective_variant="data_ward_velocity",
+                camera_translation_transform="none",
+                parameterization="peft-lora-r128-alpha128",
+                sp_size=1,
+                data_generation="h3.ref2va-proxy.124f.v1",
+            ),
+            required_components=("ema.pt",),
+            metadata={},
+        )
+
+    parameter = torch.nn.Parameter(torch.zeros(2, 2, dtype=torch.bfloat16))
+
+    class FakeLoRA:
+        def __init__(self) -> None:
+            self.parameter_by_key = {canonical_key: parameter}
+
+    weights_id = load_proxy_checkpoint(
+        str(target),
+        FakeLoRA(),
+        weight_source="ema",
+        torch=torch,
+    )
+    assert weights_id.endswith(":ema:step=500")
+    assert torch.equal(parameter, torch.full((2, 2), 1.25, dtype=torch.bfloat16))

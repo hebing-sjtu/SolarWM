@@ -25,10 +25,21 @@ def camera_fingerprint(batch: H3ArtifactBatch) -> str:
 
 
 def decode_h3_latents(video_vae: Any, latents: Any, *, device: Any) -> Any:
-    """Run official latent de-normalization and the 47->158 VisualVAE decode."""
+    """Run official latent de-normalization for any exact H3 latent geometry."""
 
     import torch
 
+    from .geometry import latent_frames_to_pixel_frames
+
+    if latents.ndim != 5 or int(latents.shape[0]) != 1 or int(latents.shape[1]) != 24:
+        raise RuntimeError(f"H3 VisualVAE input has unexpected shape {tuple(latents.shape)}")
+    expected = (
+        1,
+        3,
+        latent_frames_to_pixel_frames(int(latents.shape[2])),
+        int(latents.shape[3]) * 16,
+        int(latents.shape[4]) * 16,
+    )
     mean = torch.tensor(video_vae.config.latents_mean, device=device).view(1, -1, 1, 1, 1)
     std = torch.tensor(video_vae.config.latents_std, device=device).view(1, -1, 1, 1, 1)
     decoder_input = latents.to(device=device, dtype=torch.float32) * std + mean
@@ -44,10 +55,8 @@ def decode_h3_latents(video_vae: Any, latents: Any, *, device: Any) -> Any:
     pixel_mean = torch.tensor((0.485, 0.456, 0.406), device=device).view(1, -1, 1, 1, 1)
     pixel_std = torch.tensor((0.229, 0.224, 0.225), device=device).view(1, -1, 1, 1, 1)
     decoded = (decoded.float() * pixel_std + pixel_mean).clamp(0, 1)
-    if tuple(decoded.shape) != (1, 3, 158, 768, 1344):
-        raise RuntimeError(
-            f"H3 VisualVAE decoded {tuple(decoded.shape)}, expected [1,3,158,768,1344]"
-        )
+    if tuple(decoded.shape) != expected:
+        raise RuntimeError(f"H3 VisualVAE decoded {tuple(decoded.shape)}, expected {expected}")
     return decoded
 
 
@@ -174,6 +183,80 @@ def package_generated(
     )
 
 
+def package_proxy_generated(
+    latents: Any,
+    *,
+    video_vae: Any,
+    device: Any,
+    weights_id: str,
+    num_inference_steps: int,
+    proxy_latents: Any,
+    reference_latents: Any,
+) -> GeneratedSample:
+    """Decode and package proxy/prediction/target videos and a triptych panel."""
+
+    import torch
+    import torch.nn.functional as F
+    from safetensors.torch import save
+
+    generated = decode_h3_latents(video_vae, latents, device=device)
+    target = reference_latents
+    if target.ndim == 4:
+        target = target.unsqueeze(0)
+    target_decoded = decode_h3_latents(video_vae, target, device=device)
+    proxy = proxy_latents
+    if proxy.ndim == 4:
+        proxy = proxy.unsqueeze(0)
+    proxy_decoded = decode_h3_latents(video_vae, proxy, device=device)
+    proxy_frames = proxy_decoded.permute(0, 2, 1, 3, 4).reshape(
+        -1, 3, int(proxy_decoded.shape[-2]), int(proxy_decoded.shape[-1])
+    )
+    proxy_frames = F.interpolate(
+        proxy_frames,
+        size=(int(generated.shape[-2]), int(generated.shape[-1])),
+        mode="bilinear",
+        align_corners=False,
+    )
+    proxy_decoded = proxy_frames.reshape(
+        1,
+        int(generated.shape[2]),
+        3,
+        int(generated.shape[-2]),
+        int(generated.shape[-1]),
+    ).permute(0, 2, 1, 3, 4)
+    panel = torch.cat((proxy_decoded, generated, target_decoded), dim=-1)
+    metrics = _finite_generation_metrics(
+        latents=latents,
+        decoded=generated,
+        reference_decoded=target_decoded,
+    )
+    return GeneratedSample(
+        artifacts={
+            "generated.safetensors": save(
+                {"latents": latents.detach().to("cpu", dtype=torch.bfloat16)}
+            ),
+            "generated.mp4": _mp4_bytes(generated),
+            "proxy.mp4": _mp4_bytes(proxy_decoded),
+            "target.mp4": _mp4_bytes(target_decoded),
+            "compare.mp4": _mp4_bytes(panel),
+        },
+        shape=tuple(int(value) for value in generated.shape),
+        dtype="float32",
+        metrics=metrics,
+        provenance={
+            "weights_id": weights_id,
+            "preencode_version": "h3.ref2va-proxy.124f.v1",
+            "sampler": "shifted-euler-data-ward",
+            "solver": "shifted-euler-data-ward",
+            "num_inference_steps": int(num_inference_steps),
+            "num_sigma_points": int(num_inference_steps),
+            "video_shift": 12.0,
+            "audio_shift": 3.0,
+            "panel_order": ["proxy", "prediction", "target"],
+        },
+    )
+
+
 def _finite_generation_metrics(
     *,
     latents: Any,
@@ -214,4 +297,5 @@ __all__ = [
     "camera_fingerprint",
     "decode_h3_latents",
     "package_generated",
+    "package_proxy_generated",
 ]

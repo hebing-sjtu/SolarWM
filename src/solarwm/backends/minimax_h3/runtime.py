@@ -1434,6 +1434,10 @@ def run_inference(config: Mapping[str, Any]) -> int:
         from .full_inference import run_source_length_inference
 
         return run_source_length_inference(config)
+    if str(config.get("data", {}).get("input_mode", "")).lower() == "proxy_preencoded":
+        from .proxy_inference import run_proxy_inference
+
+        return run_proxy_inference(config)
     torch, _diffusers, _transformers = require_h3_runtime()
     import torch.distributed as dist
 

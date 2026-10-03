@@ -6,7 +6,8 @@ import hashlib
 from typing import Any
 
 from .distributed import broadcast_sp_tensor, is_sequence_parallel_enabled
-from .layout import build_row_timesteps, patchify_video
+from .flow import make_shifted_schedule
+from .layout import build_row_timesteps, patchify_video, unpatchify_video
 from .proxy_artifacts import H3ProxyArtifactBatch
 from .ref2va_layout import build_ref2va_proxy_layout
 from .stage0p5 import H3TorchLayout
@@ -246,6 +247,132 @@ class H3Ref2VAStage0p5Core:
                 f"target rows {tuple(target_rows.shape)}"
             )
         return F.mse_loss(prediction.float(), target_rows.float())
+
+    def generate(
+        self,
+        batch: H3ProxyArtifactBatch,
+        *,
+        noise_seed: int,
+        num_inference_steps: int,
+    ) -> Any:
+        """Sample one cached 124-frame Ref2VA document with shifted Euler flow."""
+
+        import torch
+
+        expected_role = str(self.config["data"]["cwm_system"])
+        if batch.cwm_system != expected_role:
+            raise RuntimeError(
+                f"H3 proxy CWM role changed at inference: {batch.cwm_system!r} != {expected_role!r}"
+            )
+        given = int(batch.num_given_latent_frames)
+        if given != int(self.config["data"]["num_given_latent_frames"]):
+            raise RuntimeError("H3 proxy inference given-frame count differs from its CWM role")
+
+        generator = torch.Generator(device=self.device).manual_seed(int(noise_seed))
+        clean = batch.target_latents.to(
+            self.device, dtype=torch.float32, non_blocking=True
+        ).unsqueeze(0)
+        anchor = _pad_spatial(
+            batch.anchor_latents.to(self.device, dtype=torch.float32, non_blocking=True).unsqueeze(
+                0
+            )
+        )
+        proxy = _pad_spatial(
+            batch.proxy_latents.to(self.device, dtype=torch.float32, non_blocking=True).unsqueeze(0)
+        )
+        prompt = batch.prompt_embeds.to(
+            self.device, dtype=torch.bfloat16, non_blocking=True
+        ).unsqueeze(0)
+        tags = batch.text_token_tags.to(self.device, dtype=torch.long)
+        self._broadcast(clean, anchor, proxy, prompt, tags)
+        layout = self.layout(tags, anchor, proxy)
+
+        condition = torch.cat((patchify_video(anchor), patchify_video(proxy)), dim=1)
+        condition_noise = torch.randn(
+            condition.shape,
+            generator=generator,
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+        audio_clean = self._audio_rows(batch)
+        audio_noise = torch.randn(
+            audio_clean.shape,
+            generator=generator,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        current = torch.randn(
+            clean.shape,
+            generator=generator,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._broadcast(condition_noise, audio_noise, current)
+        aug = float(self.config["train"]["keyframe_noise_augmentation"])
+        condition = aug * condition + (1.0 - aug) * condition_noise
+        given_value = None
+        if given:
+            given_value = (aug * clean[:, :, :given] + (1.0 - aug) * current[:, :, :given]).clone()
+            current[:, :, :given] = given_value
+
+        fixed_rows = given * layout.source.rows_per_video_frame
+        video_schedule = make_shifted_schedule(
+            int(num_inference_steps),
+            shift=float(self.config["train"]["video_timestep_shift"]),
+        )
+        audio_schedule = make_shifted_schedule(
+            int(num_inference_steps),
+            shift=float(self.config["train"]["audio_timestep_shift"]),
+        )
+        with torch.no_grad():
+            for index, (video_time, audio_time) in enumerate(
+                zip(
+                    video_schedule.timesteps,
+                    audio_schedule.timesteps,
+                    strict=True,
+                )
+            ):
+                video_t = torch.tensor(float(video_time), device=self.device)
+                audio_t = torch.tensor(float(audio_time), device=self.device)
+                audio_rows = audio_t * audio_clean + (1.0 - audio_t) * audio_noise
+                prediction = self._forward(
+                    video_rows=torch.cat((condition, patchify_video(current)), dim=1),
+                    audio_rows=audio_rows,
+                    prompt=prompt,
+                    layout=layout,
+                    video_t=video_t,
+                    audio_t=audio_t,
+                    fixed_rows=fixed_rows,
+                )
+                if fixed_rows:
+                    prediction = torch.cat(
+                        (
+                            torch.zeros_like(prediction[:, :fixed_rows]),
+                            prediction[:, fixed_rows:],
+                        ),
+                        dim=1,
+                    )
+                velocity = unpatchify_video(prediction, 37, 48, 84, channels=24).float()
+                if tuple(velocity.shape) != tuple(current.shape):
+                    raise RuntimeError(
+                        f"H3 proxy inference velocity {tuple(velocity.shape)} != "
+                        f"sample {tuple(current.shape)}"
+                    )
+                if not bool(torch.isfinite(velocity).all().item()):
+                    raise FloatingPointError("H3 proxy inference predicted non-finite velocity")
+                sigma = float(video_schedule.sigmas[index])
+                sigma_next = float(video_schedule.sigmas[index + 1])
+                if sigma == 0:
+                    raise RuntimeError("H3 proxy Euler schedule reached sigma zero early")
+                denoised = current + sigma * velocity
+                ratio = sigma_next / sigma
+                current = ratio * current + (1.0 - ratio) * denoised
+                if given_value is not None:
+                    current[:, :, :given] = given_value
+        if not bool(torch.isfinite(current).all().item()):
+            raise FloatingPointError("H3 proxy inference generated non-finite latents")
+        return current.contiguous()
 
 
 __all__ = ["H3Ref2VAStage0p5Core"]
