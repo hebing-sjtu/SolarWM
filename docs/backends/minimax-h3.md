@@ -77,6 +77,9 @@ unmodified configs retain the released recipes.
 **Ref2VA** means “reference-to-video-and-audio”: the transformer receives
 ordered visual references before the target rows. The proxy profile reads the
 existing FastVideo `.pt` cache directly; no WebDataset conversion is required.
+Use the
+[H3 proxy trainability checklist](../runbooks/h3-proxy-trainability-checklist.md)
+when loss or visual evaluations appear not to move.
 Its data contract is isolated from native `h3.158f.v1`:
 
 - 124 pixel frames become 37 target latents;
