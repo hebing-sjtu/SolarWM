@@ -44,15 +44,30 @@ def _replace_proxy_prompt_rows(
     source_runs = _vision_runs(source_tags)[1:]
     if len(destination_runs) != len(source_runs):
         raise BackendContractError("H3 proxy Qwen video block counts differ during ablation")
+
+    def fit_rows(source: slice, count: int) -> Any:
+        rows = source_prompt[source]
+        source_count = int(rows.shape[0])
+        if source_count == count:
+            return rows
+        if count == 1:
+            return rows[:1]
+        denominator = count - 1
+        indices = [
+            (index * (source_count - 1) + denominator // 2) // denominator
+            for index in range(count)
+        ]
+        return rows[indices]
+
     output = prompt.clone()
     first_source = source_runs[0]
     for index, destination in enumerate(destination_runs):
         source = first_source if static else source_runs[index]
         destination_count = int(destination.stop - destination.start)
-        source_count = int(source.stop - source.start)
-        if destination_count != source_count:
-            raise BackendContractError("H3 proxy Qwen video token counts differ during ablation")
-        output[destination] = source_prompt[source].to(dtype=output.dtype)
+        output[destination] = fit_rows(source, destination_count).to(
+            device=output.device,
+            dtype=output.dtype,
+        )
     return output
 
 

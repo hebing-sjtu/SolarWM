@@ -237,6 +237,64 @@ def test_proxy_ablation_changes_full_rate_and_qwen_proxy_only() -> None:
     assert torch.equal(static.prompt_embeds[7:9], primary.prompt_embeds[4:6])
 
 
+def test_proxy_ablation_fits_different_qwen_video_token_counts() -> None:
+    torch = pytest.importorskip("torch")
+
+    from solarwm.backends.minimax_h3.proxy_ablation import apply_proxy_ablation
+
+    def batch(
+        sample_id: str,
+        tags: list[int],
+        offset: float,
+    ) -> H3ProxyArtifactBatch:
+        prompt = torch.arange(len(tags), dtype=torch.float32).reshape(-1, 1) + offset
+        return H3ProxyArtifactBatch(
+            sample_id=sample_id,
+            start_frame=0,
+            plan_fingerprint=f"fingerprint-{sample_id}",
+            target_latents=torch.zeros(1),
+            proxy_latents=torch.full((1, 3, 1, 1), offset),
+            anchor_latents=torch.zeros(1),
+            prompt_embeds=prompt,
+            text_token_tags=torch.tensor(tags, dtype=torch.int64),
+            cwm_system="w0",
+            num_given_latent_frames=1,
+        )
+
+    primary = batch(
+        "primary",
+        [0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0],
+        0.0,
+    )
+    donor = batch(
+        "donor",
+        [0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0],
+        100.0,
+    )
+
+    shuffled = apply_proxy_ablation(primary, mode="shuffled", donor=donor)
+    assert torch.equal(
+        shuffled.prompt_embeds[4:7, 0],
+        torch.tensor([103.0, 104.0, 104.0]),
+    )
+    assert torch.equal(
+        shuffled.prompt_embeds[8:10, 0],
+        torch.tensor([106.0, 109.0]),
+    )
+    assert torch.equal(shuffled.prompt_embeds[1:3], primary.prompt_embeds[1:3])
+    assert torch.equal(
+        shuffled.prompt_embeds[[0, 3, 7, 10]],
+        primary.prompt_embeds[[0, 3, 7, 10]],
+    )
+
+    static = apply_proxy_ablation(primary, mode="static")
+    assert torch.equal(static.prompt_embeds[4:7], primary.prompt_embeds[4:7])
+    assert torch.equal(
+        static.prompt_embeds[8:10, 0],
+        torch.tensor([4.0, 6.0]),
+    )
+
+
 def test_proxy_ema_loader_canonicalizes_fsdp_and_adapter_prefixes(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
 
