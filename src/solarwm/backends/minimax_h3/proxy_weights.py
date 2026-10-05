@@ -18,11 +18,11 @@ def load_proxy_checkpoint(
     weight_source: str,
     torch: Any,
 ) -> str:
-    """Load only proxy LoRA weights, never optimizer or reader state."""
+    """Load only proxy LoRA weights for inference or training warm-start."""
 
     source = str(weight_source).strip().lower()
     if source not in {"live", "ema"}:
-        raise BackendContractError("H3 proxy inference weight_source must be live or ema")
+        raise BackendContractError("H3 proxy checkpoint weight_source must be live or ema")
     verified = verify_checkpoint(Path(path))
     contract = verified.contract
     if (
@@ -36,7 +36,7 @@ def load_proxy_checkpoint(
         or contract.camera_translation_transform != "none"
     ):
         raise BackendContractError(
-            "inference checkpoint is not a SolarWM H3 124f Ref2VA proxy LoRA"
+            "checkpoint is not a SolarWM H3 124f Ref2VA proxy LoRA"
         )
 
     if source == "live":
@@ -47,7 +47,7 @@ def load_proxy_checkpoint(
             weights_only=True,
         )
         if payload.get("metadata") != lora.metadata():
-            raise BackendContractError("H3 proxy inference LoRA metadata differs")
+            raise BackendContractError("H3 proxy LoRA metadata differs")
         values = payload.get("state")
     else:
         payload = torch.load(

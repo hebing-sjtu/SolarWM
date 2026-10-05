@@ -41,6 +41,31 @@ def test_proxy_example_resolves_to_isolated_sp1_contract() -> None:
     assert contract.camera_translation_transform == "none"
 
 
+def test_proxy_training_accepts_weight_only_initialization() -> None:
+    config = _proxy_config()
+    config["checkpoint"]["initialization"] = {
+        "student": {
+            "path": "/data/run/checkpoint_model_003000",
+            "weight_source": "live",
+            "stage": "stage0p5",
+        }
+    }
+    validate_h3_config(config)
+
+    config["checkpoint"]["resume_from"] = "/data/run/checkpoint_model_003000"
+    validate_h3_config(config)
+
+    config["checkpoint"]["resume_from"] = None
+    config["checkpoint"]["initialization"]["student"]["path"] = "relative/checkpoint"
+    with pytest.raises(ConfigurationError, match="must be absolute"):
+        validate_h3_config(config)
+
+    config["checkpoint"]["initialization"]["student"]["path"] = "/data/run/checkpoint"
+    config["checkpoint"]["initialization"]["student"]["weight_source"] = "unknown"
+    with pytest.raises(ConfigurationError, match="must be live or ema"):
+        validate_h3_config(config)
+
+
 def test_proxy_inference_example_uses_one_sp8_worker_and_allows_base_baseline() -> None:
     config = yaml.safe_load(INFER_EXAMPLE.read_text(encoding="utf-8"))
     contract = validate_h3_config(config)
@@ -346,3 +371,57 @@ def test_proxy_ema_loader_canonicalizes_fsdp_and_adapter_prefixes(tmp_path: Path
     )
     assert weights_id.endswith(":ema:step=500")
     assert torch.equal(parameter, torch.full((2, 2), 1.25, dtype=torch.bfloat16))
+
+
+def test_proxy_live_loader_supports_training_warm_start(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+
+    from solarwm.backends.minimax_h3.proxy_weights import load_proxy_checkpoint
+    from solarwm.checkpoint import CheckpointContract, CheckpointTransaction
+
+    target = tmp_path / "checkpoint_model_003000"
+    key = "base_model.model.block.attn.to_q.lora_B.weight"
+    metadata = {"target_count": 1, "trainable_parameters": 4}
+    with CheckpointTransaction(target) as transaction:
+        torch.save(
+            {
+                "metadata": metadata,
+                "state": {key: torch.full((2, 2), 2.5, dtype=torch.bfloat16)},
+            },
+            transaction.path / "adapter.pt",
+        )
+        transaction.commit(
+            step=3000,
+            contract=CheckpointContract(
+                family="minimax_h3",
+                stage="stage0p5",
+                causal_mode="bidirectional",
+                objective="flow_matching",
+                objective_variant="data_ward_velocity",
+                camera_translation_transform="none",
+                parameterization="peft-lora-r128-alpha128",
+                sp_size=1,
+                data_generation="h3.ref2va-proxy.124f.v1",
+            ),
+            required_components=("adapter.pt",),
+            metadata={},
+        )
+
+    parameter = torch.nn.Parameter(torch.zeros(2, 2, dtype=torch.bfloat16))
+
+    class FakeLoRA:
+        def __init__(self) -> None:
+            self.parameter_by_key = {key: parameter}
+
+        @staticmethod
+        def metadata() -> dict[str, int]:
+            return metadata
+
+    weights_id = load_proxy_checkpoint(
+        str(target),
+        FakeLoRA(),
+        weight_source="live",
+        torch=torch,
+    )
+    assert weights_id.endswith(":live:step=3000")
+    assert torch.equal(parameter, torch.full((2, 2), 2.5, dtype=torch.bfloat16))

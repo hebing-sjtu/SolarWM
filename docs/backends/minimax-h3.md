@@ -155,6 +155,25 @@ ranks never initialize W&B. Set `runtime.tracking.entity` when the project
 belongs to a team account. `runtime.tracking.log_media` must remain `false` for
 this profile.
 
+When the proxy dataset membership changes, do not use
+`checkpoint.resume_from`: a full resume intentionally restores and verifies
+the optimizer, scheduler, RNG, and exact reader path digest. Instead, warm-start
+a new run from only the prior proxy LoRA weights:
+
+```bash
+--set checkpoint.initialization.student.path=/absolute/checkpoint_model_003000 \
+--set checkpoint.initialization.student.weight_source=live \
+--set checkpoint.initialization.student.stage=stage0p5
+```
+
+The new run starts at optimizer step zero with fresh optimizer, scheduler, and
+EMA state; EMA is initialized from the loaded live adapter. The initialization
+checkpoint identity is recorded in every new checkpoint contract. To resume the
+new run later, keep its resolved initialization block and set
+`checkpoint.resume_from` to one of the new run's complete checkpoints. Use a
+full resume only when the data manifest and topology are unchanged and exact
+continuation is intended.
+
 ## Stage1 / Stage2 setup
 
 For training across stages, download the three EMA packages from the

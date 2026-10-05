@@ -667,6 +667,35 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
             checkpoint = _mapping(config, "checkpoint")
             _validate_checkpoint(checkpoint, stage=stage)
             if proxy:
+                resume = checkpoint.get("resume_from")
+                if resume is not None and (not isinstance(resume, str) or not resume.strip()):
+                    raise ConfigurationError(
+                        "checkpoint.resume_from must be null or a non-empty path"
+                    )
+                initialization_value = checkpoint.get("initialization")
+                if initialization_value is not None:
+                    initialization = _mapping(checkpoint, "initialization")
+                    student = _mapping(initialization, "student")
+                    path = _nonempty_path(
+                        student,
+                        "path",
+                        "checkpoint.initialization.student",
+                    )
+                    if not path.startswith("/"):
+                        raise ConfigurationError(
+                            "checkpoint.initialization.student.path must be absolute"
+                        )
+                    if student.get("weight_source") not in {"live", "ema"}:
+                        raise ConfigurationError(
+                            "checkpoint.initialization.student.weight_source "
+                            "must be live or ema"
+                        )
+                    _equal(
+                        student,
+                        "stage",
+                        "stage0p5",
+                        "checkpoint.initialization.student",
+                    )
                 maximum = int(train["max_steps"])
                 save_every = int(checkpoint.get("save_every_steps", 0))
                 save_steps = {int(step) for step in checkpoint.get("save_steps", ())}

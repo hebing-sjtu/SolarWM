@@ -504,6 +504,7 @@ class H3TrainingRuntime:
         self.student_step = 0
         self.checkpoint_cfg = config["checkpoint"]
         self.runtime_cfg = config["runtime"]
+        self.proxy_mode = str(config["data"].get("input_mode", "")).lower() == "proxy_preencoded"
         sp_size = int(config["distributed"]["sequence_parallel_size"])
         provisional = _topology(sp_size=sp_size, require_torchrun=True)
         configured_world = int(config["distributed"]["world_size"])
@@ -544,7 +545,27 @@ class H3TrainingRuntime:
             frozen_base_shard_size=self.train_cfg["fsdp"].get("frozen_base_shard_size"),
         )
         self._weights_id = _base_weights_label(self.model_cfg)
-        if self.stage != "stage0p5":
+        proxy_initialization_id = ""
+        initialization = self.checkpoint_cfg.get("initialization")
+        if self.stage == "stage0p5" and self.proxy_mode and isinstance(initialization, Mapping):
+            from .proxy_weights import load_proxy_checkpoint
+
+            student = initialization["student"]
+            self._weights_id = _collective_call(
+                lambda: load_proxy_checkpoint(
+                    str(student["path"]),
+                    self.lora,
+                    weight_source=str(student["weight_source"]),
+                    torch=torch,
+                ),
+                dist=dist,
+                topology=self.topology,
+                label="proxy training initialization",
+            )
+            proxy_initialization_id = self._weights_id
+            if self.is_main:
+                print(f"[h3-proxy-init] student={self._weights_id}", flush=True)
+        elif self.stage != "stage0p5":
             from .weights import load_initial_weights
 
             self._weights_id = load_initial_weights(
@@ -582,7 +603,6 @@ class H3TrainingRuntime:
             )
         )
         self.reader = _reader(config, self.topology)
-        self.proxy_mode = str(config["data"].get("input_mode", "")).lower() == "proxy_preencoded"
         if self.proxy_mode:
             self.silence = None
             silence_profile = {
@@ -608,6 +628,14 @@ class H3TrainingRuntime:
             config=config,
             lora_trainable_parameters=self.lora.parameter_count,
         )
+        if proxy_initialization_id:
+            self.contract = replace(
+                self.contract,
+                extras={
+                    **self.contract.extras,
+                    "initialization": {"student": proxy_initialization_id},
+                },
+            )
         self._global_step = 0
         self._finite_clip_norm = finite_clip_norm
         resume = str(self.checkpoint_cfg.get("resume_from") or "").strip()
