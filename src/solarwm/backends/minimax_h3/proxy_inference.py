@@ -18,9 +18,20 @@ from solarwm.training.wandb_sink import WandbEventSink
 from .distributed import get_sp_group, get_sp_rank, get_sp_size
 from .inference import package_proxy_generated
 from .optional import load_conditioners, load_transformer, require_h3_runtime
+from .proxy_ablation import apply_proxy_ablation
 from .proxy_artifacts import H3ProxyPtStream
 from .proxy_weights import load_proxy_checkpoint
 from .stage0p5_ref2va import H3Ref2VAStage0p5Core
+
+
+def _next_distinct_donor(stream: H3ProxyPtStream, sample_id: str) -> Any:
+    for _ in range(len(stream.paths)):
+        donor = stream.next()
+        if donor.sample_id != sample_id:
+            return donor
+    raise BackendContractError(
+        "shuffled proxy ablation requires at least two distinct cached samples"
+    )
 
 
 def run_proxy_inference(config: Mapping[str, Any]) -> int:
@@ -101,6 +112,16 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
         topology,
         selection_seed=int(config["validation"]["selection_seed"]),
     )
+    ablation_mode = str(config["validation"].get("proxy_ablation", "correct")).strip().lower()
+    donor_stream = (
+        H3ProxyPtStream(
+            config,
+            topology,
+            selection_seed=int(config["validation"]["selection_seed"]) + 1,
+        )
+        if ablation_mode == "shuffled"
+        else None
+    )
     core = H3Ref2VAStage0p5Core(model, device, config)
     output_root = Path(str(config["runtime"]["output_dir"])).resolve() / "proxy-inference"
     noise_seed = int(config["validation"]["noise_seed"])
@@ -138,6 +159,27 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                 topology=topology,
                 label=f"proxy inference data wave {wave_index}",
             )
+            donor = (
+                _collective_call(
+                    lambda batch=batch: _next_distinct_donor(donor_stream, batch.sample_id),
+                    dist=dist,
+                    topology=topology,
+                    label=f"proxy inference donor wave {wave_index}",
+                )
+                if donor_stream is not None
+                else None
+            )
+            batch = _collective_call(
+                lambda batch=batch, donor=donor: apply_proxy_ablation(
+                    batch,
+                    mode=ablation_mode,
+                    donor=donor,
+                ),
+                dist=dist,
+                topology=topology,
+                label=f"proxy inference ablation wave {wave_index}",
+            )
+            donor_sample_id = donor.sample_id if donor is not None else None
             slot = wave_index * int(topology.dp_world_size) + int(topology.dp_rank)
             seed = noise_seed + slot
             gather_and_assert_sp_identity(
@@ -168,6 +210,8 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                     "generation_mode": "bidirectional-ref2va-proxy",
                     "sample_solver": "shifted-euler-data-ward",
                     "weights_source": weight_source,
+                    "proxy_ablation": ablation_mode,
+                    "proxy_donor_sample_id": donor_sample_id,
                     "artifact_valid": True,
                 },
             )
@@ -225,6 +269,8 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                         {
                             "slot": slot,
                             "sample_id": batch.sample_id,
+                            "proxy_ablation": ablation_mode,
+                            "proxy_donor_sample_id": donor_sample_id,
                             "noise_seed": seed,
                             "output_dir": str(summary.output_dir.relative_to(output_root)),
                         }
@@ -238,7 +284,8 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                                     fps=24,
                                     format="mp4",
                                     caption=(
-                                        f"proxy | prediction | target; sample={batch.sample_id}"
+                                        f"proxy | prediction | target; sample={batch.sample_id}; "
+                                        f"ablation={ablation_mode}; donor={donor_sample_id}"
                                     ),
                                 )
                             },
@@ -259,6 +306,8 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                 )
     finally:
         stream.close()
+        if donor_stream is not None:
+            donor_stream.close()
 
     tracking_error = ""
     if topology.raw_rank == 0 and media_sink is not None:
@@ -289,6 +338,7 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                 "weights_id": weights_id,
                 "checkpoint": checkpoint_path or None,
                 "weight_source": weight_source,
+                "proxy_ablation": ablation_mode,
                 "sample_count": sample_count,
                 "num_inference_steps": inference_steps,
                 "samples": completed,

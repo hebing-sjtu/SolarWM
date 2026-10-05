@@ -448,6 +448,11 @@ def _validate_validation(
                 value = _required(validation, name, "validation")
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise ConfigurationError(f"validation.{name} must be a non-negative integer")
+            proxy_ablation = str(validation.get("proxy_ablation", "correct")).strip().lower()
+            if proxy_ablation not in {"correct", "shuffled", "static"}:
+                raise ConfigurationError(
+                    "validation.proxy_ablation must be correct, shuffled, or static"
+                )
             for key, expected in (
                 ("pixel_frames", 124),
                 ("latent_frames", 37),

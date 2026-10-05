@@ -10,7 +10,10 @@ from solarwm.backends.minimax_h3.config import validate_h3_config
 from solarwm.backends.minimax_h3.geometry import validate_proxy_stage0p5_geometry
 from solarwm.backends.minimax_h3.layout import build_row_timesteps
 from solarwm.backends.minimax_h3.lora import discover_h3_lora_targets
-from solarwm.backends.minimax_h3.proxy_artifacts import H3ProxyPtStream
+from solarwm.backends.minimax_h3.proxy_artifacts import (
+    H3ProxyArtifactBatch,
+    H3ProxyPtStream,
+)
 from solarwm.backends.minimax_h3.ref2va_layout import build_ref2va_proxy_layout
 from solarwm.config.routes import validate_route
 from solarwm.errors import ConfigurationError, DataContractError
@@ -47,6 +50,11 @@ def test_proxy_inference_example_uses_one_sp8_worker_and_allows_base_baseline() 
 
     config["checkpoint"]["resume_from"] = None
     validate_h3_config(config)
+
+    config["validation"]["proxy_ablation"] = "unknown"
+    with pytest.raises(ConfigurationError, match="proxy_ablation"):
+        validate_h3_config(config)
+    config["validation"]["proxy_ablation"] = "correct"
 
     config["distributed"]["sequence_parallel_size"] = 1
     with pytest.raises(ConfigurationError, match="SP8"):
@@ -188,6 +196,45 @@ def test_proxy_lora_discovers_only_main_attention_qkvo() -> None:
     assert len(targets) == 200
     assert all(".attn." in name for name in targets)
     assert not any("ff." in name or "refiner" in name for name in targets)
+
+
+def test_proxy_ablation_changes_full_rate_and_qwen_proxy_only() -> None:
+    torch = pytest.importorskip("torch")
+
+    from solarwm.backends.minimax_h3.proxy_ablation import apply_proxy_ablation
+
+    tags = torch.tensor([0, 1, 1, 0, 1, 1, 0, 1, 1, 0], dtype=torch.int64)
+
+    def batch(sample_id: str, offset: float) -> H3ProxyArtifactBatch:
+        return H3ProxyArtifactBatch(
+            sample_id=sample_id,
+            start_frame=0,
+            plan_fingerprint=f"fingerprint-{sample_id}",
+            target_latents=torch.zeros(1),
+            proxy_latents=(torch.arange(3, dtype=torch.float32).reshape(1, 3, 1, 1) + offset),
+            anchor_latents=torch.zeros(1),
+            prompt_embeds=(torch.arange(20, dtype=torch.float32).reshape(10, 2) + offset),
+            text_token_tags=tags,
+            cwm_system="w0",
+            num_given_latent_frames=1,
+        )
+
+    primary = batch("primary", 0.0)
+    donor = batch("donor", 100.0)
+    shuffled = apply_proxy_ablation(primary, mode="shuffled", donor=donor)
+    assert torch.equal(shuffled.proxy_latents, donor.proxy_latents)
+    assert torch.equal(shuffled.prompt_embeds[1:3], primary.prompt_embeds[1:3])
+    assert torch.equal(shuffled.prompt_embeds[4:6], donor.prompt_embeds[4:6])
+    assert torch.equal(shuffled.prompt_embeds[7:9], donor.prompt_embeds[7:9])
+    assert torch.equal(shuffled.prompt_embeds[[0, 3, 6, 9]], primary.prompt_embeds[[0, 3, 6, 9]])
+
+    static = apply_proxy_ablation(primary, mode="static")
+    assert torch.equal(
+        static.proxy_latents,
+        primary.proxy_latents[:, :1].expand_as(primary.proxy_latents),
+    )
+    assert torch.equal(static.prompt_embeds[1:3], primary.prompt_embeds[1:3])
+    assert torch.equal(static.prompt_embeds[7:9], primary.prompt_embeds[4:6])
 
 
 def test_proxy_ema_loader_canonicalizes_fsdp_and_adapter_prefixes(tmp_path: Path) -> None:

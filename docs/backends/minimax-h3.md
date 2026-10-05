@@ -288,6 +288,15 @@ Each sample directory contains `proxy.mp4`, `generated.mp4`, `target.mp4`, and
 the configured W&B project; set `runtime.tracking.entity` if the project
 belongs to a team account.
 
+For a fixed-checkpoint proxy-use ablation, run the same cache, selection seed,
+noise seed, and output geometry three times with
+`validation.proxy_ablation=correct`, `shuffled`, and `static`. Shuffled mode
+rotates in a different sample's full-rate proxy latent and its Qwen proxy
+vision-token rows while retaining the original anchor, caption, target, and
+noise. Static mode repeats the original proxy's first frame in both paths.
+The rendered proxy column and inference manifest identify the condition that
+was actually sampled.
+
 ### Stage2 SGF
 
 ```bash

@@ -81,6 +81,7 @@ validation:
   sample_count: 6
   selection_seed: 42
   noise_seed: 42
+  proxy_ablation: correct
   pixel_frames: 124
   latent_frames: 37
   fps: 24
