@@ -9,6 +9,7 @@ import torch
 
 from .distributed import broadcast_sp_tensor as broadcast_sequence_parallel_tensor
 from .layout import build_stage0p5_layout, build_stage1_layout, patchify_video, unpatchify_video
+from .lora_roles import student_role_split
 from .sgf import H3SGFWindow, h3_sgf_schedule, h3_sgf_windows
 from .sgf_attention import H3RawKVCache, H3SGFAttention
 from .torch_flow import predict_clean_sample, scale_noise
@@ -93,6 +94,16 @@ def h3_student_forward(
         cache=cache,
         commit_cache=commit_cache,
     )
+    routing = {}
+    if student_role_split(student):
+        # Rows whose K/V later chunks read: replayed history, or the chunk being committed.
+        if mode == "replay":
+            rows = layout.clean_video_indices
+        elif commit_cache:
+            rows = layout.noisy_video_indices
+        else:
+            rows = layout.noisy_video_indices[:0]
+        routing["lora_context_rows"] = rows
     # SGF's camera controls are global immutable metadata. The dedicated
     # attention path selects local query/KV camera rows after Ulysses exchange.
     prediction, _ = student(
@@ -105,6 +116,7 @@ def h3_student_forward(
         packed_sequence_parallel=inputs.sp_enabled,
         sgf_attention=control,
         return_dict=False,
+        **routing,
         **layout.transformer_kwargs(),
     )
     velocity = unpatchify_video(

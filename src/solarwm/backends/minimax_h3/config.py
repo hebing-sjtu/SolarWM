@@ -179,6 +179,13 @@ def _validate_model(
     )
     for key, expected in adapter_profile:
         _equal(adapter, key, expected, "model.adapter")
+    role_split = adapter.get("role_split", "shared")
+    if role_split not in {"shared", "sgf_plus"}:
+        raise ConfigurationError("model.adapter.role_split must be shared or sgf_plus")
+    if role_split == "sgf_plus" and (proxy or stage != "stage2"):
+        raise ConfigurationError(
+            "model.adapter.role_split=sgf_plus separates SGF context writing and requires Stage2"
+        )
 
 
 def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0p5") -> str:

@@ -286,6 +286,25 @@ torchrun --nnodes="$NNODES" --node-rank="$NODE_RANK" --nproc-per-node=8 \
   --set runtime.output_dir="$SOLAR_OUTPUT_ROOT/h3-stage2-sgf-158f"
 ```
 
+#### SGF+ role split
+
+`--set model.adapter.role_split=sgf_plus` trains
+[SGF+](https://zihan-su.github.io/self-gradient-forcing-plus/): the student
+keeps its shared LoRA for denoising and gains a second rank-384 `context`
+LoRA on the 50 main blocks (300 linears, about 2.0B parameters) for context
+writing. The context adapter serves the clean history rows of the gradient
+replay and the committed chunk in each rollout KV-commit forward; noisy rows,
+the image anchor, text and audio stay on the shared adapter. A Stage1 or SGF
+initialization copies the shared adapter into both roles, so step 0 matches
+SGF exactly. Teacher and critic are unchanged.
+
+The default `shared` is plain SGF. SGF+ checkpoints record the
+parameterization `peft-lora-r384-alpha384-sgf-plus`; resume and inference must
+use the same `role_split`. Student logs add `student_grad_norm_denoise` and
+`student_grad_norm_context` before clipping. LoRA tensors and their optimizer
+states are replicated on every GPU, so the split adds roughly 30 GiB per GPU
+(BF16 weights and gradients plus FP32 master and Adam moments).
+
 ## Resume training
 
 Use the original resolved configuration and a complete training checkpoint:

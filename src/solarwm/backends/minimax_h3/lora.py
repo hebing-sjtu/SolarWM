@@ -6,11 +6,14 @@ import json
 import re
 from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from solarwm.errors import BackendContractError
 
+H3_ROLE_SPLIT_SHARED = "shared"
+H3_ROLE_SPLIT_SGF_PLUS = "sgf_plus"
+H3_CONTEXT_ADAPTER = "context"
 H3_LORA_TARGET_COUNT = 312
 H3_LORA_TRAINABLE_PARAMETERS = 2_075_394_048
 H3_LORA_SUFFIXES = (
@@ -105,10 +108,28 @@ class H3LoRARuntime:
     base_identity: Mapping[str, Any]
     rank: int
     alpha: int
+    # SGF+ only: context-adapter state key -> the shared adapter key it mirrors.
+    context_keys: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def role_split(self) -> str:
+        return H3_ROLE_SPLIT_SGF_PLUS if self.context_keys else H3_ROLE_SPLIT_SHARED
 
     @property
     def parameters(self) -> tuple[Any, ...]:
         return tuple(self.parameter_by_key.values())
+
+    def role_parameters(self) -> dict[str, tuple[Any, ...]]:
+        """Trainable tensors per SGF+ role: ``denoise`` (shared adapter) and ``context``."""
+
+        return {
+            "denoise": tuple(
+                value
+                for key, value in self.parameter_by_key.items()
+                if key not in self.context_keys
+            ),
+            "context": tuple(self.parameter_by_key[key] for key in self.context_keys),
+        }
 
     @property
     def parameter_count(self) -> int:
@@ -141,7 +162,13 @@ class H3LoRARuntime:
                     dist.broadcast(parameter, src=0)
 
     def metadata(self) -> dict[str, Any]:
+        split = (
+            {"role_split": self.role_split, "context_keys": dict(self.context_keys)}
+            if self.context_keys
+            else {}
+        )
         return {
+            **split,
             "schema": "solarwm.minimax-h3-lora.v1",
             "peft_version": str(self.peft_module.__version__),
             "rank": self.rank,
@@ -166,8 +193,13 @@ def inject_h3_lora(
     adapter_cfg: Mapping[str, Any],
     *,
     base_identity: Mapping[str, Any],
+    role_split: str = H3_ROLE_SPLIT_SHARED,
 ) -> tuple[Any, H3LoRARuntime]:
-    """Inject standard BF16 PEFT LoRA and verify its realized topology/size."""
+    """Inject standard BF16 PEFT LoRA and verify its realized topology/size.
+
+    ``role_split="sgf_plus"`` adds a second adapter on the main transformer
+    blocks for SGF+ context writing; only causal students may request it.
+    """
 
     try:
         import peft
@@ -248,18 +280,61 @@ def inject_h3_lora(
         raise BackendContractError(
             f"H3 LoRA trainable parameters={runtime.parameter_count:,}, expected={int(expected):,}"
         )
+    if role_split == H3_ROLE_SPLIT_SGF_PLUS:
+        if target_profile != "block_qkvo_ffn":
+            raise BackendContractError("SGF+ role split requires the block_qkvo_ffn adapter")
+        from .lora_roles import install_context_adapter
+
+        main = tuple(target for target in targets if "transformer_blocks." in target)
+        model.h3_lora_role_split = True
+        context = install_context_adapter(
+            wrapped,
+            peft_module=peft,
+            context_targets=main,
+            blocks=tuple(model.transformer_blocks),
+            rank=rank,
+            alpha=alpha,
+            dropout=float(adapter_cfg.get("dropout", 0.0)),
+        )
+        context_keys = {}
+        for key, parameter in context.items():
+            mirrored = key.replace(f".{H3_CONTEXT_ADAPTER}.weight", ".weight")
+            if mirrored not in parameter_by_key:
+                raise BackendContractError(f"SGF+ context tensor {key!r} has no shared twin")
+            if tuple(parameter.shape) != tuple(parameter_by_key[mirrored].shape):
+                raise BackendContractError(f"SGF+ context tensor {key!r} differs in shape")
+            context_keys[key] = mirrored
+        runtime.parameter_by_key = OrderedDict((*parameter_by_key.items(), *context.items()))
+        runtime.context_keys = context_keys
+        trainable = tuple(
+            parameter for parameter in wrapped.parameters() if parameter.requires_grad
+        )
+        if {id(value) for value in trainable} != {id(value) for value in runtime.parameters}:
+            raise BackendContractError("SGF+ must train exactly the shared and context adapters")
+    elif role_split != H3_ROLE_SPLIT_SHARED:
+        raise BackendContractError(f"unsupported H3 LoRA role split {role_split!r}")
     if any(parameter.dtype != torch.bfloat16 for parameter in runtime.parameters):
         raise BackendContractError("all H3 LoRA parameters must remain BF16")
     return wrapped, runtime
 
 
+def h3_role_split(model_cfg: Mapping[str, Any]) -> str:
+    """The configured student LoRA role split; absent means one shared adapter."""
+
+    return str(model_cfg.get("adapter", {}).get("role_split", H3_ROLE_SPLIT_SHARED))
+
+
 __all__ = [
+    "H3_CONTEXT_ADAPTER",
     "H3_LORA_SUFFIXES",
     "H3_LORA_TARGET_COUNT",
     "H3_LORA_TRAINABLE_PARAMETERS",
     "H3_PROXY_LORA_SUFFIXES",
     "H3_PROXY_LORA_TARGET_COUNT",
+    "H3_ROLE_SPLIT_SGF_PLUS",
+    "H3_ROLE_SPLIT_SHARED",
     "H3LoRARuntime",
     "discover_h3_lora_targets",
+    "h3_role_split",
     "inject_h3_lora",
 ]

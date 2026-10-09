@@ -135,6 +135,8 @@ class H3AttentionControl:
     prope_kwargs: dict[str, Any] | None
     sgf_attention: Any = None
     sequence_lengths: tuple[int, ...] = ()
+    # SGF+ only: [1, local rows, 1] mask of rows served by the context adapter.
+    lora_route: Any = None
 
 
 def _is_flex_block_mask(mask: Any) -> bool:
@@ -578,6 +580,7 @@ class SolarMiniMaxH3Transformer3DModel(H3AnyFlowConditioningMixin, MiniMaxH3Tran
         stage0p5_sequence_parallel: bool = False,
         packed_sequence_parallel: bool | None = None,
         sgf_attention: Any = None,
+        lora_context_rows: torch.Tensor | None = None,
     ) -> MiniMaxH3TransformerOutput | tuple[torch.Tensor, torch.Tensor]:
         """Run upstream H3 with an optional dense/Flex mask and fused PRoPE.
 
@@ -590,6 +593,8 @@ class SolarMiniMaxH3Transformer3DModel(H3AnyFlowConditioningMixin, MiniMaxH3Tran
         H3's native data-ward time coordinate (``1 - sigma``).
         ``packed_sequence_parallel`` enables the shared packed/Ulysses path;
         ``stage0p5_sequence_parallel`` remains a compatibility alias.
+        ``lora_context_rows`` lists packed rows served by the SGF+ context
+        adapter; it is required exactly when that adapter is installed.
         """
 
         del attention_kwargs  # LoRA scaling is handled by the decorator.
@@ -664,9 +669,23 @@ class SolarMiniMaxH3Transformer3DModel(H3AnyFlowConditioningMixin, MiniMaxH3Tran
             prope_frame_ids = shard.prope_frame_ids
             cam_viewmats = shard.camera_viewmats
             cam_K = shard.camera_K
+        lora_route = None
+        if getattr(self, "h3_lora_role_split", False):
+            if lora_context_rows is None:
+                raise ValueError("an SGF+ student forward must declare its context rows")
+            from .lora_roles import context_rows_mask
+
+            lora_route = context_rows_mask(
+                lora_context_rows, sequence_length=sequence_length, like=packed
+            )
+            if sp_enabled:
+                lora_route = lora_route[:, shard.start : shard.stop]
+        elif lora_context_rows is not None:
+            raise ValueError("lora_context_rows requires the SGF+ context adapter")
         rotary_emb = self.rope(position_ids)
         needs_control = (
-            _is_flex_block_mask(attention_mask)
+            lora_route is not None
+            or _is_flex_block_mask(attention_mask)
             or fused_prope is not None
             or cam_viewmats is not None
             or cam_K is not None
@@ -685,6 +704,7 @@ class SolarMiniMaxH3Transformer3DModel(H3AnyFlowConditioningMixin, MiniMaxH3Tran
                 prope_kwargs=prope_kwargs,
                 sgf_attention=sgf_attention,
                 sequence_lengths=shard.sequence_lengths if sp_enabled else (),
+                lora_route=lora_route,
             )
             if needs_control
             else attention_mask

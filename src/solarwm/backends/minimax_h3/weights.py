@@ -14,6 +14,9 @@ from typing import Any
 
 from solarwm.errors import BackendContractError
 
+H3_PARAMETERIZATION = "peft-lora-r384-alpha384"
+H3_SGF_PLUS_PARAMETERIZATION = f"{H3_PARAMETERIZATION}-sgf-plus"
+
 
 def canonical_lora_key(key: str) -> str:
     parts = (
@@ -46,6 +49,7 @@ def load_initial_weights(spec: Mapping[str, Any], lora: Any) -> str:
     if not (root / "COMPLETE.json").is_file():
         raise BackendContractError(f"H3 initialization checkpoint is incomplete: {root}")
     manifest_path = root / "checkpoint-manifest.json"
+    split_source = False
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         contract = manifest.get("contract", {})
@@ -53,8 +57,15 @@ def load_initial_weights(spec: Mapping[str, Any], lora: Any) -> str:
             "family": "minimax_h3",
             "stage": stage,
             "camera_translation_transform": "logd4",
-            "parameterization": "peft-lora-r384-alpha384",
         }
+        parameterization = contract.get("parameterization")
+        split_source = parameterization == H3_SGF_PLUS_PARAMETERIZATION
+        if parameterization != H3_PARAMETERIZATION and not split_source:
+            raise BackendContractError(f"H3 initialization parameterization {parameterization!r}")
+        if split_source and not getattr(lora, "context_keys", None):
+            raise BackendContractError(
+                "an SGF+ checkpoint needs model.adapter.role_split=sgf_plus to load both adapters"
+            )
         profile = contract.get("extras", {}).get("encoder_profile", {})
         if any(contract.get(key) != value for key, value in required.items()) or (
             profile.get("pixel_frames"),
@@ -124,7 +135,15 @@ def load_initial_weights(spec: Mapping[str, Any], lora: Any) -> str:
         values = load_file(str(root / component), device="cpu")
     translated = {canonical_lora_key(key): value for key, value in values.items()}
     expected = lora.parameter_by_key
-    if len(translated) != len(values) or set(translated) != set(expected):
+    if len(translated) != len(values):
+        raise BackendContractError("H3 initialization LoRA tensor keys collide")
+    context_keys = dict(getattr(lora, "context_keys", None) or {})
+    if context_keys and not split_source:
+        # A shared-adapter source starts both SGF+ roles from the same weights.
+        translated.update(
+            {key: translated[twin] for key, twin in context_keys.items() if twin in translated}
+        )
+    if set(translated) != set(expected):
         raise BackendContractError("H3 initialization LoRA tensor keys differ")
     for key, parameter in expected.items():
         value = translated[key]

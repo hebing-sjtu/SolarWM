@@ -72,6 +72,7 @@ from .distributed import (
     sync_lora_gradients,
 )
 from .inference import camera_fingerprint, package_generated
+from .lora import H3_ROLE_SPLIT_SGF_PLUS, h3_role_split
 from .optional import load_conditioners, load_transformer, require_h3_runtime
 from .proxy_artifacts import H3ProxyPtStream
 from .stage0p5 import H3Stage0p5Core
@@ -290,7 +291,8 @@ def _checkpoint_contract(
         objective=str(train.get("objective", "flow_matching")),
         objective_variant="v1_5" if stage == "stage1" else "data_ward_velocity",
         camera_translation_transform=str(model_cfg.get("camera_translation_transform", "logd4")),
-        parameterization=f"peft-lora-r{rank}-alpha{alpha}",
+        parameterization=f"peft-lora-r{rank}-alpha{alpha}"
+        + ("-sgf-plus" if h3_role_split(model_cfg) == H3_ROLE_SPLIT_SGF_PLUS else ""),
         sp_size=int(distributed_cfg.get("sequence_parallel_size", 4 if stage == "stage2" else 2)),
         data_generation=str(data_cfg.get("preencode_version", "h3.158f.v1")),
         extras={
@@ -534,6 +536,7 @@ class H3TrainingRuntime:
             modules.transformer,
             self.model_cfg["adapter"],
             base_identity=base_model,
+            role_split=h3_role_split(self.model_cfg),
         )
         self.model = wrap_h3_fsdp(
             wrapped,
@@ -1505,6 +1508,7 @@ def run_inference(config: Mapping[str, Any]) -> int:
         modules.transformer,
         config["model"]["adapter"],
         base_identity=base_model,
+        role_split=h3_role_split(config["model"]),
     )
     model = wrap_h3_fsdp(
         model,

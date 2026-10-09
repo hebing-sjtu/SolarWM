@@ -52,6 +52,11 @@ class H3SGFTrainingRuntime(H3TrainingRuntime):
             self.contract,
             extras={**self.contract.extras, "initialization": dict(self.initialization)},
         )
+        self._role_gradient_keys = (
+            tuple(f"student_grad_norm_{role}" for role in self.lora.role_parameters())
+            if self.lora.context_keys
+            else ()
+        )
         resume = str(self.checkpoint_cfg.get("resume_from") or "")
         if resume:
             self.load_checkpoint(resume)
@@ -117,8 +122,30 @@ class H3SGFTrainingRuntime(H3TrainingRuntime):
         if self.ema is not None:
             self.ema.update(self.model)
 
-    def _finish_update(self, model: Any, lora: Any, optimizer: Any, scheduler: Any) -> float:
+    def _role_gradient_norms(self, lora: Any) -> dict[str, float]:
+        """Pre-clip gradient norm of each SGF+ adapter; empty for a shared adapter."""
+
+        if not lora.context_keys:
+            return {}
+        torch = self.torch
+        norms = {}
+        for role, parameters in lora.role_parameters().items():
+            squares = [
+                parameter.grad.detach().float().square().sum()
+                for parameter in parameters
+                if parameter.grad is not None
+            ]
+            norms[f"student_grad_norm_{role}"] = (
+                float(torch.stack(squares).sum().sqrt()) if squares else 0.0
+            )
+        return norms
+
+    def _finish_update(
+        self, model: Any, lora: Any, optimizer: Any, scheduler: Any, stats: Any = None
+    ) -> float:
         sync_lora_gradients(lora.parameters)
+        if stats is not None:
+            stats.update(self._role_gradient_norms(lora))
         finite, norm = self._finite_clip_norm(
             (parameter for parameter in model.parameters() if parameter.requires_grad),
             10.0,
@@ -152,6 +179,7 @@ class H3SGFTrainingRuntime(H3TrainingRuntime):
             "student_updated": float(update_student),
             "loss_student": 0.0,
             "student_grad_norm": 0.0,
+            **{key: 0.0 for key in self._role_gradient_keys},
         }
         if update_student:
             self._phase("student_rollout")
@@ -176,7 +204,7 @@ class H3SGFTrainingRuntime(H3TrainingRuntime):
             (loss / get_sp_size()).backward()
             stats["loss_student"] = float(loss.detach())
             stats["student_grad_norm"] = self._finish_update(
-                self.model, self.lora, self.optimizer, self.scheduler
+                self.model, self.lora, self.optimizer, self.scheduler, stats
             )
             self.student_step += 1
             self._student_ema_update()

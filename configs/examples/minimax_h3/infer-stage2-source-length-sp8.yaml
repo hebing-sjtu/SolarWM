@@ -33,6 +33,8 @@ model:
     dtype: bfloat16
     expected_target_linear_modules: 312
     expected_trainable_parameters: 2075394048
+    # shared: one student LoRA (SGF). sgf_plus: separate context-writing and denoising LoRAs.
+    role_split: shared
   student_rope_mode: sliding_local
   score_rope_mode: native_absolute
 data:

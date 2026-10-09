@@ -283,7 +283,7 @@ def generate(args):
     from .artifacts import load_silence_latents
     from .distributed import broadcast_sp_tensor as broadcast_sequence_parallel_tensor
     from .layout import patchify_video
-    from .lora import inject_h3_lora
+    from .lora import h3_role_split, inject_h3_lora
     from .optional import load_conditioners, load_transformer
     from .runtime import _base_model_load_receipt
     from .sgf_rollout import H3SGFInputs, h3_sgf_rollout
@@ -300,7 +300,12 @@ def generate(args):
     torch.manual_seed(42)
     modules = load_transformer(cfg["model"], device=device)
     base = _base_model_load_receipt(cfg["model"], modules.transformer)
-    model, lora = inject_h3_lora(modules.transformer, cfg["model"]["adapter"], base_identity=base)
+    model, lora = inject_h3_lora(
+        modules.transformer,
+        cfg["model"]["adapter"],
+        base_identity=base,
+        role_split=h3_role_split(cfg["model"]),
+    )
     weights_id = load_initial_weights(
         dict(path=args.checkpoint, stage="stage2", weight_source=args.weight_source), lora
     )
