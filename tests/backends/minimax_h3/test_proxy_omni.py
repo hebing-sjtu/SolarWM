@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[3]
 EXAMPLES = ROOT / "configs/examples/minimax_h3"
 OMNI = EXAMPLES / "stage0p5-124f-ref2va-omni-704p-sp2.yaml"
 OMNI_INFER = EXAMPLES / "infer-stage0p5-124f-ref2va-omni-704p-sp8.yaml"
+MIXED = EXAMPLES / "stage0p5-124f-ref2va-omni-mixed-low-704p-sp1.yaml"
+MIXED_INFER = EXAMPLES / "infer-stage0p5-124f-ref2va-omni-mixed-low-704p-sp8.yaml"
 LEGACY = EXAMPLES / "stage0p5-124f-ref2va-proxy-sp1.yaml"
 
 
@@ -41,6 +43,30 @@ def test_omni_examples_validate_at_704p_with_sp2_training_and_sp8_inference() ->
     assert contract.sequence_parallel_size == 2
     assert (contract.pixel_frames, contract.encoded_latents) == (124, 37)
     assert validate_h3_config(_config(OMNI_INFER)).sequence_parallel_size == 8
+
+
+def test_mixed_single_reference_examples_validate_with_both_time_policies() -> None:
+    contract = validate_h3_config(_config(MIXED))
+    assert contract.sequence_parallel_size == 1
+    assert validate_h3_config(_config(MIXED_INFER)).sequence_parallel_size == 8
+    aligned = _config(MIXED)
+    aligned["data"]["align_proxy_reference_time"] = True
+    validate_h3_config(aligned)
+
+
+def test_mixed_single_reference_role_and_variant_contract_are_explicit() -> None:
+    config = _config(MIXED)
+    config["data"]["cwm_system"] = "w0"
+    with pytest.raises(ConfigurationError, match=r"requires data.cwm_system='w0_omni'"):
+        validate_h3_config(config)
+    config = _config(MIXED)
+    del config["data"]["proxy_variants"]
+    with pytest.raises(ConfigurationError, match=r"requires data.proxy_variants"):
+        validate_h3_config(config)
+    config = _config(MIXED)
+    config["data"]["proxy_references"] = ["duv"]
+    with pytest.raises(ConfigurationError, match="mutually exclusive"):
+        validate_h3_config(config)
 
 
 def test_proxy_training_accepts_sp_sizes_that_divide_the_world() -> None:
@@ -219,6 +245,53 @@ def test_the_reader_loads_an_omni_cache_and_refuses_other_references(tmp_path: P
     _write_omni_sample(other / "a.pt", references=["semantic", "depth"])
     with pytest.raises(DataContractError, match="proxy_references"):
         H3ProxyPtStream(_config(OMNI, other), Topology(1, 0, 1, 0)).next()
+
+
+def _write_mixed_sample(path: Path, *, modality: str = "depth") -> None:
+    torch = pytest.importorskip("torch")
+    torch.save(
+        {
+            "vae_latent": torch.zeros(24, 37, 44, 80),
+            "proxy_latents": torch.zeros(1, 24, 37, 11, 20),
+            "anchor_latent": torch.zeros(24, 1, 128, 232),
+            "text_embedding": torch.zeros(4, 5120),
+            "text_token_tags": torch.tensor([1, 0, 0, 1], dtype=torch.int64),
+            "info": {
+                "cwm_system": "w0_omni",
+                "qwen_video_fps": 2.0,
+                "proxy_modality": modality,
+                "proxy_references": [modality],
+                "proxy_variants": ["duv", "depth", "semantic", "style"],
+                "fit": "center-crop",
+                "code_resize": "nearest",
+            },
+        },
+        path,
+    )
+
+
+def test_the_reader_accepts_per_sample_mixed_modalities_and_exposes_the_actual_kind(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("torch")
+    _write_mixed_sample(tmp_path / "a.pt", modality="semantic")
+    stream = H3ProxyPtStream(_config(MIXED, tmp_path), Topology(1, 0, 1, 0))
+    batch = stream.next()
+    assert stream.variants == ("duv", "depth", "semantic", "style")
+    assert batch.proxy_references == ("semantic",)
+    assert batch.proxy_latents.shape == (1, 24, 37, 11, 20)
+    assert stream.encoder_profile["extras"]["proxy_variants"] == [
+        "duv",
+        "depth",
+        "semantic",
+        "style",
+    ]
+
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    _write_mixed_sample(bad / "a.pt", modality="normals")
+    with pytest.raises(DataContractError, match="expected exactly one of"):
+        H3ProxyPtStream(_config(MIXED, bad), Topology(1, 0, 1, 0)).next()
 
 
 def test_static_ablation_freezes_each_proxy_video_on_its_own_first_block() -> None:

@@ -21,11 +21,12 @@ from .geometry import PROXY_STAGE0P5_GEOMETRY, H3ProxyStage0p5Geometry, proxy_ge
 H3_PROXY_PREENCODE_VERSION = "h3.ref2va-proxy.124f.v1"
 H3_PROXY_DATASET_NAME = "h3_proxy_pt"
 # Given latent frames promised by each FastVideo CWM system prompt.
-CWM_GIVEN_FRAMES = {"w0": 1, "wn": 10, "w0_depth_semantic": 1}
+CWM_GIVEN_FRAMES = {"w0": 1, "wn": 10, "w0_depth_semantic": 1, "w0_omni": 1}
 _CWM_GIVEN_FRAMES = CWM_GIVEN_FRAMES
 # What `encode_proxy_samples.py --proxy-references` can cache, and the default single DUV video.
-PROXY_REFERENCE_KINDS = ("duv", "depth", "semantic")
+PROXY_REFERENCE_KINDS = ("duv", "depth", "semantic", "style")
 LEGACY_PROXY_REFERENCES = ("duv",)
+OMNI_MIXED_ROLE = "w0_omni"
 # Video references each role's system prompt names, in <Video N> order. Unlisted roles name one.
 CWM_ROLE_REFERENCES = {"w0_depth_semantic": ("depth", "semantic")}
 
@@ -46,10 +47,39 @@ def proxy_references_from_data(data: Mapping[str, Any]) -> tuple[str, ...]:
     return references
 
 
+def proxy_variants_from_data(data: Mapping[str, Any]) -> tuple[str, ...]:
+    """Allowed modalities for one mixed-single-reference omni run."""
+
+    value = data.get("proxy_variants")
+    if value is None:
+        return ()
+    if "proxy_references" in data:
+        raise DataContractError(
+            "data.proxy_variants and data.proxy_references are mutually exclusive"
+        )
+    if not isinstance(value, (list, tuple)) or not value:
+        raise DataContractError("data.proxy_variants must be a non-empty list")
+    variants = tuple(str(item).strip().lower() for item in value)
+    unknown = sorted(set(variants) - set(PROXY_REFERENCE_KINDS))
+    if unknown or len(set(variants)) != len(variants):
+        raise DataContractError(
+            f"data.proxy_variants must be distinct values of {list(PROXY_REFERENCE_KINDS)}, "
+            f"got {list(value)}"
+        )
+    return variants
+
+
 def check_role_references(role: str, references: tuple[str, ...]) -> None:
     """Refuse a CWM role whose system prompt describes other videos than the cache carries."""
 
     expected = CWM_ROLE_REFERENCES.get(role)
+    if role == OMNI_MIXED_ROLE:
+        if len(references) != 1 or references[0] not in PROXY_REFERENCE_KINDS:
+            raise DataContractError(
+                f"CWM role {role!r} requires exactly one typed proxy video, got "
+                f"{list(references)}"
+            )
+        return
     if expected is None and len(references) != 1:
         raise DataContractError(
             f"CWM role {role!r} describes one proxy video, but proxy_references is "
@@ -84,6 +114,9 @@ def h3_proxy_encoder_contract(
     anchor_short_edge: int,
     geometry: H3ProxyStage0p5Geometry = PROXY_STAGE0P5_GEOMETRY,
     proxy_references: tuple[str, ...] = LEGACY_PROXY_REFERENCES,
+    proxy_variants: tuple[str, ...] = (),
+    proxy_fit: str | None = None,
+    proxy_code_resize: str | None = None,
 ) -> EncoderContract:
     """Describe the cached Ref2VA semantics without claiming native H3 compatibility.
 
@@ -94,8 +127,17 @@ def h3_proxy_encoder_contract(
     role = str(cwm_system).strip().lower()
     if role not in _CWM_GIVEN_FRAMES:
         raise DataContractError(f"unsupported proxy CWM role {cwm_system!r}")
+    variants = tuple(proxy_variants)
     references = tuple(proxy_references)
-    check_role_references(role, references)
+    if variants:
+        if role != OMNI_MIXED_ROLE:
+            raise DataContractError(
+                f"mixed proxy variants require CWM role {OMNI_MIXED_ROLE!r}, got {role!r}"
+            )
+        if references != ("proxy",):
+            raise DataContractError("mixed proxy variants use one generic video reference")
+    else:
+        check_role_references(role, references)
     legacy = references == LEGACY_PROXY_REFERENCES
     target_shape = (
         geometry.latent_channels,
@@ -103,20 +145,29 @@ def h3_proxy_encoder_contract(
         geometry.latent_height,
         geometry.latent_width,
     )
-    reference_extras: dict[str, Any] = (
-        {
+    if variants:
+        reference_extras: dict[str, Any] = {
+            "reference_order": ["picture_anchor", "video_proxy"],
+            "qwen_presentation": (
+                "<Picture 1> then one modality-labelled <Video 1> plus CWM user caption"
+            ),
+            "proxy_variants": list(variants),
+            "proxy_fit": proxy_fit,
+            "proxy_code_resize": proxy_code_resize,
+        }
+    elif legacy:
+        reference_extras = {
             "reference_order": ["picture_anchor", "video_proxy"],
             "qwen_presentation": "<Picture 1> then <Video 1> plus CWM user caption",
         }
-        if legacy
-        else {
+    else:
+        reference_extras = {
             "reference_order": ["picture_anchor", *(f"video_{kind}" for kind in references)],
             "qwen_presentation": "<Picture 1> then "
             + ", ".join(f"<Video {index + 1}>" for index in range(len(references)))
             + " plus CWM user caption",
             "proxy_references": list(references),
         }
-    )
     return EncoderContract(
         schema="solarwm.encoder.v1",
         family="minimax_h3",
@@ -162,6 +213,7 @@ class H3ProxyArtifactBatch:
     cwm_system: str
     num_given_latent_frames: int
     audio_latents: Any = None
+    proxy_references: tuple[str, ...] = LEGACY_PROXY_REFERENCES
     dataset_source: str = "fastvideo_proxy_pt"
 
 
@@ -215,7 +267,10 @@ class H3ProxyPtStream:
             self.geometry = proxy_geometry_from_data(data)
         except ValueError as exc:
             raise DataContractError(str(exc)) from exc
-        self.references = proxy_references_from_data(data)
+        self.variants = proxy_variants_from_data(data)
+        self.references = ("proxy",) if self.variants else proxy_references_from_data(data)
+        self.expected_fit = str(data.get("proxy_fit") or "")
+        self.expected_code_resize = str(data.get("proxy_code_resize") or "")
         self.encoder_profile = h3_proxy_encoder_contract(
             qwen_video_fps=self.expected_qwen_fps,
             cwm_system=self.expected_role,
@@ -223,6 +278,9 @@ class H3ProxyPtStream:
             anchor_short_edge=int(data["anchor_short_edge"]),
             geometry=self.geometry,
             proxy_references=self.references,
+            proxy_variants=self.variants,
+            proxy_fit=self.expected_fit or None,
+            proxy_code_resize=self.expected_code_resize or None,
         ).as_dict()
         self.epoch = 0
         self.cursor = 0
@@ -332,11 +390,32 @@ class H3ProxyPtStream:
                 f"expected {self.expected_qwen_fps}"
             )
         recorded = tuple(info.get("proxy_references") or LEGACY_PROXY_REFERENCES)
-        if recorded != self.references:
-            raise DataContractError(
-                f"H3 proxy sample {path} has proxy_references={list(recorded)}, "
-                f"expected {list(self.references)}"
-            )
+        if self.variants:
+            modality = str(info.get("proxy_modality") or "").strip().lower()
+            recorded_variants = tuple(info.get("proxy_variants") or ())
+            if (
+                modality not in self.variants
+                or recorded != (modality,)
+                or recorded_variants != self.variants
+                or str(info.get("fit") or "") != self.expected_fit
+                or str(info.get("code_resize") or "") != self.expected_code_resize
+            ):
+                raise DataContractError(
+                    f"H3 proxy sample {path} has modality={modality!r} and "
+                    f"proxy_references={list(recorded)}, variants={list(recorded_variants)}, "
+                    f"fit={info.get('fit')!r}, code_resize={info.get('code_resize')!r}; "
+                    f"expected exactly one of {list(self.variants)}, "
+                    f"variants={list(self.variants)}, "
+                    f"fit={self.expected_fit!r}, code_resize={self.expected_code_resize!r}"
+                )
+            sample_references = recorded
+        else:
+            if recorded != self.references:
+                raise DataContractError(
+                    f"H3 proxy sample {path} has proxy_references={list(recorded)}, "
+                    f"expected {list(self.references)}"
+                )
+            sample_references = self.references
         audio = payload.get("audio_latent")
         if audio is not None:
             audio = self._float_tensor(audio, "audio_latent")
@@ -357,6 +436,7 @@ class H3ProxyPtStream:
             cwm_system=role,
             num_given_latent_frames=_CWM_GIVEN_FRAMES[role],
             audio_latents=audio,
+            proxy_references=sample_references,
         )
 
     def next(self) -> H3ProxyArtifactBatch:
@@ -408,6 +488,7 @@ __all__ = [
     "H3_PROXY_DATASET_NAME",
     "H3_PROXY_PREENCODE_VERSION",
     "LEGACY_PROXY_REFERENCES",
+    "OMNI_MIXED_ROLE",
     "PROXY_REFERENCE_KINDS",
     "H3ProxyArtifactBatch",
     "H3ProxyPtStream",
@@ -415,4 +496,5 @@ __all__ = [
     "h3_proxy_encoder_contract",
     "proxy_latent_shape",
     "proxy_references_from_data",
+    "proxy_variants_from_data",
 ]

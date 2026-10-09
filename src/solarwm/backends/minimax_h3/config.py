@@ -16,8 +16,10 @@ from .proxy_artifacts import (
     CWM_GIVEN_FRAMES,
     H3_PROXY_DATASET_NAME,
     H3_PROXY_PREENCODE_VERSION,
+    OMNI_MIXED_ROLE,
     check_role_references,
     proxy_references_from_data,
+    proxy_variants_from_data,
 )
 
 # Proxy training shards one document's sequence; an omni 1280x704 document is ~2.3x the
@@ -201,9 +203,12 @@ def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0
             ("latent_channels", 24),
             ("qwen_video_fps", 2),
             ("anchor_short_edge", 2048),
-            ("align_proxy_reference_time", False),
         ):
             _equal(data, key, expected, "data")
+        if not isinstance(data.get("align_proxy_reference_time"), bool):
+            raise ConfigurationError(
+                "data.align_proxy_reference_time must be an explicit boolean"
+            )
         for key in ("height", "width", "latent_height", "latent_width"):
             _positive_int(data, key, "data")
         for key in ("proxy_latent_height", "proxy_latent_width"):
@@ -213,7 +218,26 @@ def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0
             raise ConfigurationError(f"data.cwm_system must be one of {sorted(CWM_GIVEN_FRAMES)}")
         _equal(data, "num_given_latent_frames", CWM_GIVEN_FRAMES[cwm_system], "data")
         try:
-            check_role_references(cwm_system, proxy_references_from_data(data))
+            proxy_variants = proxy_variants_from_data(data)
+            if proxy_variants:
+                if cwm_system != OMNI_MIXED_ROLE:
+                    raise DataContractError(
+                        "data.proxy_variants requires data.cwm_system='w0_omni'"
+                    )
+                if data.get("proxy_fit") != "center-crop":
+                    raise DataContractError(
+                        "mixed omni data.proxy_fit must be 'center-crop'"
+                    )
+                if data.get("proxy_code_resize") != "nearest":
+                    raise DataContractError(
+                        "mixed omni data.proxy_code_resize must be 'nearest'"
+                    )
+            else:
+                if cwm_system == OMNI_MIXED_ROLE:
+                    raise DataContractError(
+                        "data.cwm_system='w0_omni' requires data.proxy_variants"
+                    )
+                check_role_references(cwm_system, proxy_references_from_data(data))
         except DataContractError as exc:
             raise ConfigurationError(str(exc)) from exc
         data_path = _nonempty_path(data, "data_path", "data")

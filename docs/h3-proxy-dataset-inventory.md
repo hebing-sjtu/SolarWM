@@ -369,7 +369,7 @@ the older Qwen-24-FPS ABot cache. Before training, verify that all 8,238
 expected `.pt` samples are present and that their embedded metadata reports
 Qwen 2 FPS and CWM `w0`.
 
-### 720p native generation for omni training (planned)
+### 720p native generation for omni training
 
 This is a reusable corpus at standard 720p, cut once from the 1920 x 1080
 source. RGB, depth, semantic ids and DUV are all written at 1280 x 720 (an
@@ -415,6 +415,57 @@ The 97 held-out clips are not an in-training validation stream. SolarWM proxy
 training intentionally disables native camera-conditioned validation; encode
 the held-out manifest with the same cache contract and run the separate proxy
 inference path when qualitative evaluation is required.
+
+#### Mixed-single-reference omni profile
+
+The fixed depth+semantic profile above presents two proxy videos at once. The
+mixed profile instead presents exactly one `<Video 1>` per sample and trains
+one LoRA across `duv`, `depth`, `semantic`, and same-semantics/different-style
+RGB references. This keeps the sequence substantially shorter and matches the
+inference contract in which any one of those modalities may be supplied.
+
+A mixed manifest row may carry `proxy_duv` (the raw depth/class directory),
+`proxy` (the style-reference RGB video), or both. It may explicitly set
+`"proxy_modality": "depth"` (or `duv`, `semantic`, `style`). If the field is
+absent, the encoder deterministically balances rows across the available
+requested variants and rejects a requested modality that receives no sample.
+Each target is encoded once rather than once per modality.
+
+For H3, first center-crop every 1280 x 720 stream to the common 1280 x 704
+field of view. The low reference is then 320 x 176 and the medium reference is
+640 x 352. Both are exact integer scales of that field of view. Depth and
+semantic ids use nearest-neighbour downsampling; DUV is packed only after
+those planes are resized. Never resize a pre-packed DUV video.
+
+Low-reference cache:
+
+```bash
+scripts/h3_proxy/prepare_data/encode_proxy_shards.sh \
+  --manifest <720p clips root>/_fastvideo/train.jsonl --root <720p clips root> \
+  --output /data/binghe/h3_proxy/cache/omni-mixed-low-704p-qwen2 \
+  --model-path <MiniMax-H3> --num-frames 124 --height 704 --width 1280 \
+  --proxy-height 176 --proxy-width 320 --fit center-crop \
+  --code-resize nearest --proxy-variants duv depth semantic style \
+  --cwm-system w0_omni --anchor-short-edge 2048 --qwen-video-fps 2
+```
+
+The resulting `proxy_latents` tensor is `[1, 24, 37, 11, 20]`.
+`info.proxy_modality` names the actual reference and `info.prompt` retains the
+original caption; Qwen receives an additional first line naming the reference
+modality. The mixed profile always derives `<Picture 1>` from target frame
+zero, even if the manifest also contains an `anchor` path. Train with
+`stage0p5-124f-ref2va-omni-mixed-low-704p-sp1.yaml`.
+
+`align_proxy_reference_time` is a SolarWM/FastVideo packing policy, not an
+official MiniMax-H3 switch. `false` places the proxy before the target on the
+RoPE time axis; `true` assigns corresponding proxy and target frames the same
+time coordinate. The same cache supports both policies, but a full optimizer
+resume must not cross between them; use a weight-only warm start. For the
+aligned experiment, prefer the medium 640 x 352 reference
+(`[1, 24, 37, 22, 40]`): after H3's 2 x 2 transformer patching its spatial
+grid is an exact half-scale of the target. The 320 x 176 latent height is odd
+and has to be padded from 11 to 12 before transformer patching, so its aligned
+spatial coordinates are necessarily approximate.
 
 ## Native SolarWM data
 

@@ -1,0 +1,113 @@
+# Cached-sample visualization for the mixed-single-reference omni profile.
+# Use --set data.align_proxy_reference_time=true for a checkpoint trained with temporal alignment.
+schema: solarwm.run.v1
+action: infer
+name: minimax-h3-stage0p5-124f-ref2va-omni-mixed-low-704p-sp8
+
+model:
+  family: minimax_h3
+  architecture: minimax-h3-33b
+  checkpoint_path: /data/models/MiniMax-H3
+  transformer_subfolder: transformer_ref
+  transformer_device_map: null
+  training_mode: lora
+  conditioning_mode: ref2va_proxy
+  torch_dtype: bfloat16
+  load_conditioners: false
+  camera_attention_mode: none
+  attention_head_dim: 128
+  camera_prope_head_dim_start: 96
+  camera_prope_head_dim_end: 128
+  camera_translation_transform: none
+  camera_intrinsics_mode: none
+  latent_channels: 24
+  latent_height: 44
+  latent_width: 80
+  rows_per_latent: 880
+  num_frames_per_block: 5
+  max_prior_clean_chunks: 5
+  attention_backend: flash
+  adapter:
+    type: lora
+    target: main_attention_qkvo
+    rank: 128
+    alpha: 128
+    dropout: 0.0
+    bias: none
+    dtype: bfloat16
+    expected_target_linear_modules: 200
+
+data:
+  input_mode: proxy_preencoded
+  format: fastvideo_pt
+  dataset_name: h3_proxy_pt
+  data_path: /data/binghe/h3_proxy/cache/omni-mixed-low-704p-qwen2
+  preencode_version: h3.ref2va-proxy.124f.v1
+  pixel_frames: 124
+  encoded_latents: 37
+  train_target_latents: 37
+  height: 704
+  width: 1280
+  latent_channels: 24
+  latent_height: 44
+  latent_width: 80
+  proxy_latent_height: 11
+  proxy_latent_width: 20
+  proxy_variants: [duv, depth, semantic, style]
+  proxy_fit: center-crop
+  proxy_code_resize: nearest
+  audio_latents: 207
+  qwen_video_fps: 2
+  cwm_system: w0_omni
+  num_given_latent_frames: 1
+  align_proxy_reference_time: false
+  anchor_short_edge: 2048
+  seed: 42
+  num_workers: 1
+
+distributed:
+  world_size: 8
+  sequence_parallel_size: 8
+  context_parallel_size: 1
+  rank_partition: node_shard
+  sp_peers_share_sample: true
+  sp_peers_share_rng: true
+
+train:
+  stage: stage0p5
+  causal_mode: bidirectional
+  objective: flow_matching
+  video_timestep_shift: 12.0
+  audio_timestep_shift: 3.0
+  keyframe_noise_augmentation: 0.999
+
+validation:
+  sample_count: 8
+  selection_seed: 42
+  noise_seed: 42
+  proxy_ablation: correct
+  pixel_frames: 124
+  latent_frames: 37
+  fps: 24
+  num_inference_steps: 30
+  passes: [ema]
+
+checkpoint:
+  resume_from: /data/binghe/h3_proxy/solarwm-runs/omni-mixed-low-unaligned-lora128/checkpoint_model_000600
+  weight_source: ema
+
+runtime:
+  output_dir: /data/binghe/h3_proxy/evals/omni-mixed-low/step-600
+  tracking:
+    enabled: true
+    provider: wandb
+    project: solarwm-h3-proxy-eval
+    entity: null
+    group: omni-mixed-low-lora128
+    run_name: step-600
+    tags: [minimax-h3, stage0p5, ref2va-proxy, omni, mixed-single, cached-sample-eval]
+    mode: online
+    resume: allow
+    run_id: null
+    log_media: true
+    loss_ema_beta: 0.95

@@ -124,6 +124,7 @@ def apply_proxy_ablation(
         if (
             donor.cwm_system != batch.cwm_system
             or donor.num_given_latent_frames != batch.num_given_latent_frames
+            or donor.proxy_references != batch.proxy_references
         ):
             raise BackendContractError("shuffled proxy donor has a different CWM contract")
         if tuple(donor.proxy_latents.shape) != tuple(batch.proxy_latents.shape):

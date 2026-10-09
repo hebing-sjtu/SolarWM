@@ -24,13 +24,18 @@ from .proxy_weights import load_proxy_checkpoint
 from .stage0p5_ref2va import H3Ref2VAStage0p5Core
 
 
-def _next_distinct_donor(stream: H3ProxyPtStream, sample_id: str) -> Any:
+def _next_distinct_donor(
+    stream: H3ProxyPtStream,
+    sample_id: str,
+    proxy_references: tuple[str, ...],
+) -> Any:
     for _ in range(len(stream.paths)):
         donor = stream.next()
-        if donor.sample_id != sample_id:
+        if donor.sample_id != sample_id and donor.proxy_references == proxy_references:
             return donor
     raise BackendContractError(
-        "shuffled proxy ablation requires at least two distinct cached samples"
+        "shuffled proxy ablation requires at least two distinct cached samples "
+        f"with modality {list(proxy_references)}"
     )
 
 
@@ -123,11 +128,6 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
         else None
     )
     core = H3Ref2VAStage0p5Core(model, device, config)
-    panel_caption = (
-        "proxy"
-        if len(stream.references) == 1
-        else " | ".join(f"proxy_{name}" for name in stream.references)
-    )
     output_root = Path(str(config["runtime"]["output_dir"])).resolve() / "proxy-inference"
     noise_seed = int(config["validation"]["noise_seed"])
     inference_steps = int(config["validation"]["num_inference_steps"])
@@ -166,7 +166,11 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
             )
             donor = (
                 _collective_call(
-                    lambda batch=batch: _next_distinct_donor(donor_stream, batch.sample_id),
+                    lambda batch=batch: _next_distinct_donor(
+                        donor_stream,
+                        batch.sample_id,
+                        batch.proxy_references,
+                    ),
                     dist=dist,
                     topology=topology,
                     label=f"proxy inference donor wave {wave_index}",
@@ -250,7 +254,10 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                         num_inference_steps=inference_steps,
                         proxy_latents=batch.proxy_latents,
                         reference_latents=batch.target_latents,
-                        proxy_references=stream.references,
+                        proxy_references=batch.proxy_references,
+                    )
+                    panel_caption = " | ".join(
+                        f"proxy_{name}" for name in batch.proxy_references
                     )
 
                     class CachedAdapter:
