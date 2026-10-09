@@ -7,7 +7,9 @@ PyTorch, Diffusers, or materialize the 33B transformer.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -242,9 +244,12 @@ def validate_proxy_stage0p5_geometry(
     proxy_latent_height: int,
     proxy_latent_width: int,
 ) -> H3ProxyStage0p5Geometry:
-    """Validate the isolated 124f Ref2VA proxy profile."""
+    """Validate a 124f Ref2VA proxy profile on any VAE-consistent canvas.
 
-    expected = PROXY_STAGE0P5_GEOMETRY
+    The time axis is frozen (124 pixel frames, 37 latents, 207 audio latents); the canvas is
+    not, so a 1280x704 omni cache trains on the same path as the 768x1344 release geometry.
+    """
+
     observed = H3ProxyStage0p5Geometry(
         pixel_frames=int(pixel_frames),
         encoded_latents=int(encoded_latents),
@@ -256,11 +261,16 @@ def validate_proxy_stage0p5_geometry(
         proxy_latent_height=int(proxy_latent_height),
         proxy_latent_width=int(proxy_latent_width),
     )
-    if observed != expected:
+    frozen = PROXY_STAGE0P5_GEOMETRY
+    if (
+        observed.pixel_frames,
+        observed.encoded_latents,
+        observed.latent_channels,
+        observed.patch_size,
+    ) != (frozen.pixel_frames, frozen.encoded_latents, frozen.latent_channels, frozen.patch_size):
         raise ValueError(
-            "MiniMax-H3 Ref2VA proxy Stage0.5 supports only 124f -> 37 latents "
-            "at 768x1344 with [24,37,48,84] target and [24,37,12,21] proxy "
-            f"latents; got {observed}"
+            "MiniMax-H3 Ref2VA proxy Stage0.5 supports only 124f -> 37 latents with 24 "
+            f"channels; got {observed}"
         )
     if pixel_frames_to_latent_frames(observed.pixel_frames) != observed.encoded_latents:
         raise ValueError("proxy pixel/latent temporal geometry is internally inconsistent")
@@ -269,9 +279,34 @@ def validate_proxy_stage0p5_geometry(
         raise ValueError("proxy target height does not match VisualVAE compression")
     if observed.width // DEFAULT_GEOMETRY.vae_spatial_compression != observed.latent_width:
         raise ValueError("proxy target width does not match VisualVAE compression")
-    if observed.rows_per_latent != 1008 or observed.audio_latents != 207:
-        raise ValueError("proxy target token/audio geometry differs from the frozen profile")
+    if not (
+        0 < observed.proxy_latent_height <= observed.latent_height
+        and 0 < observed.proxy_latent_width <= observed.latent_width
+    ):
+        raise ValueError(
+            f"proxy latent grid {observed.proxy_latent_height}x{observed.proxy_latent_width} must "
+            f"be positive and no larger than the target's "
+            f"{observed.latent_height}x{observed.latent_width}"
+        )
+    if observed.audio_latents != frozen.audio_latents:
+        raise ValueError("proxy audio geometry differs from the frozen 124f profile")
     return observed
+
+
+def proxy_geometry_from_data(data: Mapping[str, Any]) -> H3ProxyStage0p5Geometry:
+    """Validated proxy geometry of a ``data`` config section."""
+
+    return validate_proxy_stage0p5_geometry(
+        pixel_frames=int(data["pixel_frames"]),
+        encoded_latents=int(data["encoded_latents"]),
+        height=int(data["height"]),
+        width=int(data["width"]),
+        latent_channels=int(data["latent_channels"]),
+        latent_height=int(data["latent_height"]),
+        latent_width=int(data["latent_width"]),
+        proxy_latent_height=int(data["proxy_latent_height"]),
+        proxy_latent_width=int(data["proxy_latent_width"]),
+    )
 
 
 def spatial_position_axis(dim: int, patch: int, sqrt_area: float) -> np.ndarray:
@@ -358,6 +393,7 @@ __all__ = [
     "latent_frames_to_pixel_frames",
     "native_video_position_grid",
     "pixel_frames_to_latent_frames",
+    "proxy_geometry_from_data",
     "spatial_position_axis",
     "temporal_position_grid",
     "validate_canvas",

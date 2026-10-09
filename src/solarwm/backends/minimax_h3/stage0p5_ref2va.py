@@ -21,24 +21,45 @@ def _pad_spatial(latents: Any) -> Any:
     return F.pad(latents, (0, pad_w, 0, pad_h)) if pad_h or pad_w else latents
 
 
+def _proxy_videos(proxy_latents: Any) -> Any:
+    """``[R, 24, T, h, w]`` proxy references; a legacy ``[24, T, h, w]`` cache is one of them."""
+
+    return proxy_latents.unsqueeze(0) if proxy_latents.ndim == 4 else proxy_latents
+
+
+def _condition_rows(anchor: Any, proxies: Any) -> Any:
+    """Patchified ``[anchor | proxy_1 | ... | proxy_R]`` reference rows."""
+
+    import torch
+
+    videos = (patchify_video(proxies[index : index + 1]) for index in range(int(proxies.shape[0])))
+    return torch.cat((patchify_video(anchor), *videos), dim=1)
+
+
 class H3Ref2VAStage0p5Core:
-    """Train the Ref2VA partition on ``[text|anchor|proxy|audio|target]``."""
+    """Train the Ref2VA partition on ``[text|anchor|proxy_1..proxy_R|audio|target]``."""
 
     def __init__(self, model: Any, device: Any, config: Any) -> None:
         self.model = model
         self.device = device
         self.config = config
+        data = config["data"]
+        self.target_frames = int(data["encoded_latents"])
+        self.target_height = int(data["latent_height"])
+        self.target_width = int(data["latent_width"])
         self._layouts: dict[str, H3TorchLayout] = {}
 
     def layout(self, tags: Any, anchor: Any, proxy: Any) -> H3TorchLayout:
         import torch
 
         tags_cpu = tags.detach().cpu().long().numpy()
+        proxy = _proxy_videos(proxy)
         dimensions = (
             int(anchor.shape[-2]),
             int(anchor.shape[-1]),
             int(proxy.shape[-2]),
             int(proxy.shape[-1]),
+            int(proxy.shape[0]),
         )
         key = hashlib.blake2s(
             tags_cpu.tobytes()
@@ -55,11 +76,12 @@ class H3Ref2VAStage0p5Core:
             proxy_frames=int(proxy.shape[-3]),
             proxy_height=dimensions[2],
             proxy_width=dimensions[3],
-            target_frames=37,
-            target_height=48,
-            target_width=84,
+            target_frames=self.target_frames,
+            target_height=self.target_height,
+            target_width=self.target_width,
             num_audio_latents=207,
             align_proxy_reference_time=bool(self.config["data"]["align_proxy_reference_time"]),
+            num_proxy_references=dimensions[4],
         )
         layout = H3TorchLayout(
             source=source,
@@ -169,7 +191,9 @@ class H3Ref2VAStage0p5Core:
             )
         )
         proxy = _pad_spatial(
-            batch.proxy_latents.to(self.device, dtype=torch.float32, non_blocking=True).unsqueeze(0)
+            _proxy_videos(
+                batch.proxy_latents.to(self.device, dtype=torch.float32, non_blocking=True)
+            )
         )
         prompt = batch.prompt_embeds.to(
             self.device, dtype=torch.bfloat16, non_blocking=True
@@ -178,7 +202,7 @@ class H3Ref2VAStage0p5Core:
         self._broadcast(clean, anchor, proxy, prompt, tags)
         layout = self.layout(tags, anchor, proxy)
 
-        condition_rows = torch.cat((patchify_video(anchor), patchify_video(proxy)), dim=1)
+        condition_rows = _condition_rows(anchor, proxy)
         condition_noise = torch.randn(
             condition_rows.shape,
             generator=generator,
@@ -278,7 +302,9 @@ class H3Ref2VAStage0p5Core:
             )
         )
         proxy = _pad_spatial(
-            batch.proxy_latents.to(self.device, dtype=torch.float32, non_blocking=True).unsqueeze(0)
+            _proxy_videos(
+                batch.proxy_latents.to(self.device, dtype=torch.float32, non_blocking=True)
+            )
         )
         prompt = batch.prompt_embeds.to(
             self.device, dtype=torch.bfloat16, non_blocking=True
@@ -287,7 +313,7 @@ class H3Ref2VAStage0p5Core:
         self._broadcast(clean, anchor, proxy, prompt, tags)
         layout = self.layout(tags, anchor, proxy)
 
-        condition = torch.cat((patchify_video(anchor), patchify_video(proxy)), dim=1)
+        condition = _condition_rows(anchor, proxy)
         condition_noise = torch.randn(
             condition.shape,
             generator=generator,
@@ -353,7 +379,13 @@ class H3Ref2VAStage0p5Core:
                         ),
                         dim=1,
                     )
-                velocity = unpatchify_video(prediction, 37, 48, 84, channels=24).float()
+                velocity = unpatchify_video(
+                    prediction,
+                    self.target_frames,
+                    self.target_height,
+                    self.target_width,
+                    channels=24,
+                ).float()
                 if tuple(velocity.shape) != tuple(current.shape):
                     raise RuntimeError(
                         f"H3 proxy inference velocity {tuple(velocity.shape)} != "

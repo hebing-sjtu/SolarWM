@@ -1,6 +1,6 @@
 # H3 proxy experiment dataset inventory
 
-Last updated: 2026-10-03
+Last updated: 2026-10-09
 
 This is the working inventory for the GTA/ABot proxy-to-video experiments that
 were prepared in FastVideo, plus the native MiniMax-H3 data route supported by
@@ -368,6 +368,48 @@ Qwen 2 FPS does not reduce the VAE timeline. Never merge this directory with
 the older Qwen-24-FPS ABot cache. Before training, verify that all 8,238
 expected `.pt` samples are present and that their embedded metadata reports
 Qwen 2 FPS and CWM `w0`.
+
+### 720p native generation for omni training (planned)
+
+This is a reusable corpus at standard 720p, cut once from the 1920 x 1080
+source. RGB, depth, semantic ids and DUV are all written at 1280 x 720 (an
+exact 2/3 scale), so other models can consume it uncropped. A Wan cache, for
+example, uses the 1280 x 720 target directly. The datapipe route is:
+
+```bash
+make clip-episodes DEPTH=moge3 REFINER=sam2 PROXY_DUV=1 \
+  WORK_SIZE=1280x720 DUV_SIZE=native CLIPS_DIR=<720p clips root>
+```
+
+Each clip carries `target/rgb.mp4` and `target/anchor.png` at 1280 x 720,
+`proxy/duv.mp4` at 1280 x 720, and `duv/NNNNNN.depth.f32` plus
+`NNNNNN.semantic_id.png` at 1280 x 720 (cwm12, sky depth 0). A native depth
+frame is 3.69 MB, so one clip's planes take about 457 MB, and 10k clips take
+about 4.6 TB.
+
+The H3 omni cache center-crops every stream to 1280 x 704, removing 8 rows at
+the top and 8 at the bottom, with no scaling. The manifest and strict split are
+the same as for the 768p generation (`make proxy-duv-manifest`, then the
+episode split in the datapipe's `FASTVIDEO_TRAINING_DATA.md` section 6). They
+yield `proxy_duv` rows that point at `duv/`. Only the encoder flags change:
+
+```bash
+scripts/h3_proxy/prepare_data/encode_proxy_shards.sh \
+  --manifest <720p clips root>/_fastvideo/train.jsonl --root <720p clips root> \
+  --output /data/binghe/h3_proxy/cache/abot_720p_omni_704_qwen2 \
+  --model-path <MiniMax-H3> --num-frames 124 --height 704 --width 1280 \
+  --proxy-height 704 --proxy-width 1280 --fit center-crop \
+  --proxy-references depth semantic --cwm-system w0_depth_semantic \
+  --anchor-short-edge 2048 --qwen-video-fps 2
+```
+
+The contract is a 1280 x 704 target `[24, 37, 44, 80]`;
+`proxy_latents` `[2, 24, 37, 44, 80]` in the order depth, then semantic; the
+anchor cropped to 1280:704 and scaled to short edge 2048; reference order
+`<Picture 1>`, `<Video 1>` depth, `<Video 2>` semantic; and CWM role
+`w0_depth_semantic` with one given latent. Train it with
+`stage0p5-124f-ref2va-omni-704p-sp2.yaml`. Never mix it with the 768 x 1344
+DUV caches.
 
 The 97 held-out clips are not an in-training validation stream. SolarWM proxy
 training intentionally disables native camera-conditioned validation; encode

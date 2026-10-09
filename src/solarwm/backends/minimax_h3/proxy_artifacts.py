@@ -16,11 +16,64 @@ from solarwm.errors import DataContractError
 from solarwm.preencode import EncoderContract, TensorSpec
 from solarwm.runtime import Topology
 
-from .geometry import PROXY_STAGE0P5_GEOMETRY
+from .geometry import PROXY_STAGE0P5_GEOMETRY, H3ProxyStage0p5Geometry, proxy_geometry_from_data
 
 H3_PROXY_PREENCODE_VERSION = "h3.ref2va-proxy.124f.v1"
 H3_PROXY_DATASET_NAME = "h3_proxy_pt"
-_CWM_GIVEN_FRAMES = {"w0": 1, "wn": 10}
+# Given latent frames promised by each FastVideo CWM system prompt.
+CWM_GIVEN_FRAMES = {"w0": 1, "wn": 10, "w0_depth_semantic": 1}
+_CWM_GIVEN_FRAMES = CWM_GIVEN_FRAMES
+# What `encode_proxy_samples.py --proxy-references` can cache, and the default single DUV video.
+PROXY_REFERENCE_KINDS = ("duv", "depth", "semantic")
+LEGACY_PROXY_REFERENCES = ("duv",)
+# Video references each role's system prompt names, in <Video N> order. Unlisted roles name one.
+CWM_ROLE_REFERENCES = {"w0_depth_semantic": ("depth", "semantic")}
+
+
+def proxy_references_from_data(data: Mapping[str, Any]) -> tuple[str, ...]:
+    """Validated ``data.proxy_references``; absent means the single packed DUV video."""
+
+    value = data.get("proxy_references", list(LEGACY_PROXY_REFERENCES))
+    if not isinstance(value, (list, tuple)) or not value:
+        raise DataContractError("data.proxy_references must be a non-empty list")
+    references = tuple(str(item).strip().lower() for item in value)
+    unknown = sorted(set(references) - set(PROXY_REFERENCE_KINDS))
+    if unknown or len(set(references)) != len(references):
+        raise DataContractError(
+            f"data.proxy_references must be distinct values of {list(PROXY_REFERENCE_KINDS)}, "
+            f"got {list(value)}"
+        )
+    return references
+
+
+def check_role_references(role: str, references: tuple[str, ...]) -> None:
+    """Refuse a CWM role whose system prompt describes other videos than the cache carries."""
+
+    expected = CWM_ROLE_REFERENCES.get(role)
+    if expected is None and len(references) != 1:
+        raise DataContractError(
+            f"CWM role {role!r} describes one proxy video, but proxy_references is "
+            f"{list(references)}; use w0_depth_semantic for depth+semantic"
+        )
+    if expected is not None and references != expected:
+        raise DataContractError(
+            f"CWM role {role!r} describes the video references {list(expected)}, "
+            f"but proxy_references is {list(references)}"
+        )
+
+
+def proxy_latent_shape(
+    geometry: H3ProxyStage0p5Geometry, references: tuple[str, ...]
+) -> tuple[int, ...]:
+    """Cached proxy tensor shape: ``proxy_latent`` for one DUV, ``proxy_latents`` otherwise."""
+
+    shape = (
+        geometry.latent_channels,
+        geometry.encoded_latents,
+        geometry.proxy_latent_height,
+        geometry.proxy_latent_width,
+    )
+    return shape if references == LEGACY_PROXY_REFERENCES else (len(references), *shape)
 
 
 def h3_proxy_encoder_contract(
@@ -29,13 +82,41 @@ def h3_proxy_encoder_contract(
     cwm_system: str,
     align_proxy_reference_time: bool,
     anchor_short_edge: int,
+    geometry: H3ProxyStage0p5Geometry = PROXY_STAGE0P5_GEOMETRY,
+    proxy_references: tuple[str, ...] = LEGACY_PROXY_REFERENCES,
 ) -> EncoderContract:
-    """Describe the cached Ref2VA semantics without claiming native H3 compatibility."""
+    """Describe the cached Ref2VA semantics without claiming native H3 compatibility.
+
+    The legacy single-DUV profile is emitted exactly as before, so existing checkpoints keep
+    resuming; other reference sets add their names to the extras.
+    """
 
     role = str(cwm_system).strip().lower()
     if role not in _CWM_GIVEN_FRAMES:
         raise DataContractError(f"unsupported proxy CWM role {cwm_system!r}")
-    geometry = PROXY_STAGE0P5_GEOMETRY
+    references = tuple(proxy_references)
+    check_role_references(role, references)
+    legacy = references == LEGACY_PROXY_REFERENCES
+    target_shape = (
+        geometry.latent_channels,
+        geometry.encoded_latents,
+        geometry.latent_height,
+        geometry.latent_width,
+    )
+    reference_extras: dict[str, Any] = (
+        {
+            "reference_order": ["picture_anchor", "video_proxy"],
+            "qwen_presentation": "<Picture 1> then <Video 1> plus CWM user caption",
+        }
+        if legacy
+        else {
+            "reference_order": ["picture_anchor", *(f"video_{kind}" for kind in references)],
+            "qwen_presentation": "<Picture 1> then "
+            + ", ".join(f"<Video {index + 1}>" for index in range(len(references)))
+            + " plus CWM user caption",
+            "proxy_references": list(references),
+        }
+    )
     return EncoderContract(
         schema="solarwm.encoder.v1",
         family="minimax_h3",
@@ -46,8 +127,8 @@ def h3_proxy_encoder_contract(
         width=geometry.width,
         camera_convention="none",
         tensors=(
-            TensorSpec("target_latents", (24, 37, 48, 84), "float32"),
-            TensorSpec("proxy_latents", (24, 37, 12, 21), "float32"),
+            TensorSpec("target_latents", target_shape, "float32"),
+            TensorSpec("proxy_latents", proxy_latent_shape(geometry, references), "float32"),
             TensorSpec("anchor_latents", (24, 1, None, None), "float32"),
             TensorSpec("prompt_embeds", (None, 5120), "float32"),
             TensorSpec("text_token_tags", (None,), "int64"),
@@ -55,8 +136,7 @@ def h3_proxy_encoder_contract(
         extras={
             "storage": "fastvideo-pt-cache-v1",
             "conditioning_mode": "ref2va_proxy",
-            "reference_order": ["picture_anchor", "video_proxy"],
-            "qwen_presentation": "<Picture 1> then <Video 1> plus CWM user caption",
+            **reference_extras,
             "qwen_hidden_state": 50,
             "qwen_video_fps": float(qwen_video_fps),
             "cwm_system": role,
@@ -131,11 +211,18 @@ class H3ProxyPtStream:
         self.paths = _sample_paths(str(data["data_path"]))
         self.expected_role = str(data["cwm_system"]).strip().lower()
         self.expected_qwen_fps = float(data["qwen_video_fps"])
+        try:
+            self.geometry = proxy_geometry_from_data(data)
+        except ValueError as exc:
+            raise DataContractError(str(exc)) from exc
+        self.references = proxy_references_from_data(data)
         self.encoder_profile = h3_proxy_encoder_contract(
             qwen_video_fps=self.expected_qwen_fps,
             cwm_system=self.expected_role,
             align_proxy_reference_time=bool(data["align_proxy_reference_time"]),
             anchor_short_edge=int(data["anchor_short_edge"]),
+            geometry=self.geometry,
+            proxy_references=self.references,
         ).as_dict()
         self.epoch = 0
         self.cursor = 0
@@ -187,9 +274,11 @@ class H3ProxyPtStream:
             raise DataContractError(f"cannot read H3 proxy sample {path}: {exc}") from exc
         if not isinstance(payload, Mapping):
             raise DataContractError(f"H3 proxy sample {path} is not a mapping")
+        legacy = self.references == LEGACY_PROXY_REFERENCES
+        proxy_key = "proxy_latent" if legacy else "proxy_latents"
         required = {
             "vae_latent",
-            "proxy_latent",
+            proxy_key,
             "anchor_latent",
             "text_embedding",
             "text_token_tags",
@@ -199,15 +288,25 @@ class H3ProxyPtStream:
             raise DataContractError(f"H3 proxy sample {path} misses {missing}")
 
         target = self._float_tensor(payload["vae_latent"], "vae_latent")
-        proxy = self._float_tensor(payload["proxy_latent"], "proxy_latent")
+        proxy = self._float_tensor(payload[proxy_key], proxy_key)
         anchor = self._float_tensor(payload["anchor_latent"], "anchor_latent")
         prompt = self._float_tensor(payload["text_embedding"], "text_embedding")
         tags = payload["text_token_tags"]
         if not isinstance(tags, torch.Tensor) or tags.dtype != torch.int64:
             raise DataContractError("H3 proxy text_token_tags must be an int64 tensor")
         tags = tags.detach().cpu().contiguous()
-        self._shape(target, (24, 37, 48, 84), "vae_latent")
-        self._shape(proxy, (24, 37, 12, 21), "proxy_latent")
+        geometry = self.geometry
+        self._shape(
+            target,
+            (
+                geometry.latent_channels,
+                geometry.encoded_latents,
+                geometry.latent_height,
+                geometry.latent_width,
+            ),
+            "vae_latent",
+        )
+        self._shape(proxy, proxy_latent_shape(geometry, self.references), proxy_key)
         self._shape(anchor, (24, 1, None, None), "anchor_latent")
         self._shape(prompt, (None, 5120), "text_embedding")
         self._shape(tags, (None,), "text_token_tags")
@@ -231,6 +330,12 @@ class H3ProxyPtStream:
             raise DataContractError(
                 f"H3 proxy sample {path} has qwen_video_fps={qwen_fps}, "
                 f"expected {self.expected_qwen_fps}"
+            )
+        recorded = tuple(info.get("proxy_references") or LEGACY_PROXY_REFERENCES)
+        if recorded != self.references:
+            raise DataContractError(
+                f"H3 proxy sample {path} has proxy_references={list(recorded)}, "
+                f"expected {list(self.references)}"
             )
         audio = payload.get("audio_latent")
         if audio is not None:
@@ -298,9 +403,16 @@ class H3ProxyPtStream:
 
 
 __all__ = [
+    "CWM_GIVEN_FRAMES",
+    "CWM_ROLE_REFERENCES",
     "H3_PROXY_DATASET_NAME",
     "H3_PROXY_PREENCODE_VERSION",
+    "LEGACY_PROXY_REFERENCES",
+    "PROXY_REFERENCE_KINDS",
     "H3ProxyArtifactBatch",
     "H3ProxyPtStream",
+    "check_role_references",
     "h3_proxy_encoder_contract",
+    "proxy_latent_shape",
+    "proxy_references_from_data",
 ]

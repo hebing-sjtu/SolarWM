@@ -111,8 +111,13 @@ def build_ref2va_proxy_layout(
     num_audio_latents: int = 207,
     align_proxy_reference_time: bool = False,
     patch_size: tuple[int, int, int] = (1, 2, 2),
+    num_proxy_references: int = 1,
 ) -> H3PackedLayout:
-    """Build ``[text | anchor | proxy | target audio | target video]``."""
+    """Build ``[text | anchor | proxy_1 .. proxy_N | target audio | target video]``.
+
+    Every proxy video shares one latent geometry. Each advances the reference clock by its own
+    temporal span, which is how H3 orders ``<Video 1>``, ``<Video 2>``... in Ref2VA.
+    """
 
     tags = np.asarray(text_token_tags, dtype=np.int64)
     if tags.ndim != 1 or not np.isin(tags, (0, 1)).all():
@@ -123,24 +128,27 @@ def build_ref2va_proxy_layout(
         raise ValueError("time-aligned proxy and target must have equal latent frame counts")
     if min(anchor_height, anchor_width, proxy_height, proxy_width) <= 0:
         raise ValueError("Ref2VA reference latent grids must be positive")
+    if int(num_proxy_references) < 1:
+        raise ValueError("Ref2VA proxy layout needs at least one proxy video reference")
 
     _, patch_h, patch_w = patch_size
     anchor_h, anchor_w = _padded(anchor_height, patch_h), _padded(anchor_width, patch_w)
     proxy_h, proxy_w = _padded(proxy_height, patch_h), _padded(proxy_width, patch_w)
+    proxy_reference = H3ReferenceGeometry(
+        "video",
+        proxy_frames,
+        proxy_h,
+        proxy_w,
+        time_aligned=bool(align_proxy_reference_time),
+    )
     references = (
         H3ReferenceGeometry("image", 1, anchor_h, anchor_w),
-        H3ReferenceGeometry(
-            "video",
-            proxy_frames,
-            proxy_h,
-            proxy_w,
-            time_aligned=bool(align_proxy_reference_time),
-        ),
+        *((proxy_reference,) * int(num_proxy_references)),
     )
     target_rows_per_frame = (target_height // patch_h) * (target_width // patch_w)
-    reference_rows = (anchor_h // patch_h) * (anchor_w // patch_w) + proxy_frames * (
-        proxy_h // patch_h
-    ) * (proxy_w // patch_w)
+    reference_rows = (anchor_h // patch_h) * (anchor_w // patch_w) + int(
+        num_proxy_references
+    ) * proxy_frames * (proxy_h // patch_h) * (proxy_w // patch_w)
     num_text = int(tags.size)
     num_audio_rows = int(num_audio_latents) * 2
     num_target_rows = int(target_frames) * target_rows_per_frame

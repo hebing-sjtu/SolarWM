@@ -7,12 +7,22 @@ from dataclasses import dataclass
 from typing import Any
 
 from solarwm.data import resolve_index_path
-from solarwm.errors import ConfigurationError
+from solarwm.errors import ConfigurationError, DataContractError
 
 from .camera import h3_fused_prope_contract
 from .codec import H3_PREENCODE_VERSION
-from .geometry import validate_proxy_stage0p5_geometry, validate_stage0p5_geometry
-from .proxy_artifacts import H3_PROXY_DATASET_NAME, H3_PROXY_PREENCODE_VERSION
+from .geometry import proxy_geometry_from_data, validate_stage0p5_geometry
+from .proxy_artifacts import (
+    CWM_GIVEN_FRAMES,
+    H3_PROXY_DATASET_NAME,
+    H3_PROXY_PREENCODE_VERSION,
+    check_role_references,
+    proxy_references_from_data,
+)
+
+# Proxy training shards one document's sequence; an omni 1280x704 document is ~2.3x the
+# legacy one and needs more than one GPU's activations.
+PROXY_TRAIN_SP_SIZES = (1, 2, 4, 8)
 
 
 @dataclass(frozen=True)
@@ -116,14 +126,16 @@ def _validate_model(
         common_model.append(("conditioning_mode", "ref2va_proxy"))
     for key, expected in common_model:
         _equal(model, key, expected, "model")
+    # A proxy run's canvas comes from its data section; validate_h3_config ties the two together.
+    canvas = (
+        () if proxy else (("latent_height", 48), ("latent_width", 84), ("rows_per_latent", 1008))
+    )
     for key, expected in (
         ("attention_head_dim", 128),
         ("camera_prope_head_dim_start", 96),
         ("camera_prope_head_dim_end", 128),
         ("latent_channels", 24),
-        ("latent_height", 48),
-        ("latent_width", 84),
-        ("rows_per_latent", 1008),
+        *canvas,
         ("num_frames_per_block", 5),
         ("max_prior_clean_chunks", 5),
     ):
@@ -186,40 +198,34 @@ def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0
             ("pixel_frames", 124),
             ("encoded_latents", 37),
             ("train_target_latents", 37),
-            ("height", 768),
-            ("width", 1344),
             ("latent_channels", 24),
-            ("latent_height", 48),
-            ("latent_width", 84),
-            ("proxy_latent_height", 12),
-            ("proxy_latent_width", 21),
             ("qwen_video_fps", 2),
             ("anchor_short_edge", 2048),
             ("align_proxy_reference_time", False),
         ):
             _equal(data, key, expected, "data")
+        for key in ("height", "width", "latent_height", "latent_width"):
+            _positive_int(data, key, "data")
+        for key in ("proxy_latent_height", "proxy_latent_width"):
+            _positive_int(data, key, "data")
         cwm_system = str(_required(data, "cwm_system", "data")).strip().lower()
-        if cwm_system not in {"w0", "wn"}:
-            raise ConfigurationError("data.cwm_system must be w0 or wn")
-        expected_given = 1 if cwm_system == "w0" else 10
-        _equal(data, "num_given_latent_frames", expected_given, "data")
+        if cwm_system not in CWM_GIVEN_FRAMES:
+            raise ConfigurationError(f"data.cwm_system must be one of {sorted(CWM_GIVEN_FRAMES)}")
+        _equal(data, "num_given_latent_frames", CWM_GIVEN_FRAMES[cwm_system], "data")
+        try:
+            check_role_references(cwm_system, proxy_references_from_data(data))
+        except DataContractError as exc:
+            raise ConfigurationError(str(exc)) from exc
         data_path = _nonempty_path(data, "data_path", "data")
         if not data_path.startswith("/"):
             raise ConfigurationError("data.data_path must be absolute")
         workers = data.get("num_workers", 1)
         if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
             raise ConfigurationError("data.num_workers must be a positive integer")
-        validate_proxy_stage0p5_geometry(
-            pixel_frames=int(data["pixel_frames"]),
-            encoded_latents=int(data["encoded_latents"]),
-            height=int(data["height"]),
-            width=int(data["width"]),
-            latent_channels=int(data["latent_channels"]),
-            latent_height=int(data["latent_height"]),
-            latent_width=int(data["latent_width"]),
-            proxy_latent_height=int(data["proxy_latent_height"]),
-            proxy_latent_width=int(data["proxy_latent_width"]),
-        )
+        try:
+            proxy_geometry_from_data(data)
+        except ValueError as exc:
+            raise ConfigurationError(str(exc)) from exc
         return input_mode
     transport = _mapping(data, "transport")
     kind = str(_required(transport, "kind", "data.transport")).strip().lower()
@@ -412,9 +418,15 @@ def _validate_training(
     _equal(distributed, "context_parallel_size", 1, "distributed")
     _equal(distributed, "sp_peers_share_sample", True, "distributed")
     _equal(distributed, "sp_peers_share_rng", True, "distributed")
-    expected_sp = 1 if proxy else (4 if sgf else 2)
-    if sequence_parallel != expected_sp:
-        raise ConfigurationError(f"H3 {stage} requires sequence_parallel_size={expected_sp}")
+    if proxy:
+        if sequence_parallel not in PROXY_TRAIN_SP_SIZES:
+            raise ConfigurationError(
+                f"H3 proxy training requires sequence_parallel_size in {list(PROXY_TRAIN_SP_SIZES)}"
+            )
+    else:
+        expected_sp = 4 if sgf else 2
+        if sequence_parallel != expected_sp:
+            raise ConfigurationError(f"H3 {stage} requires sequence_parallel_size={expected_sp}")
     if sgf:
         _equal(fsdp, "frozen_base_shard_size", 8, "train.fsdp")
     if world_size % sequence_parallel:
@@ -626,6 +638,14 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
     declared_input_mode = str(data.get("input_mode", "")).strip().lower()
     _validate_model(model, action=action, input_mode=declared_input_mode, stage=stage)
     input_mode = _validate_data(data, action=action, stage=stage)
+    if input_mode == "proxy_preencoded":
+        geometry = proxy_geometry_from_data(data)
+        for key, expected in (
+            ("latent_height", geometry.latent_height),
+            ("latent_width", geometry.latent_width),
+            ("rows_per_latent", geometry.rows_per_latent),
+        ):
+            _equal(model, key, expected, "model")
 
     if action != "preencode":
         train = _mapping(config, "train")

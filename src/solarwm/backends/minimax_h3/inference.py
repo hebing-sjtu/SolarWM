@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from solarwm.errors import BackendContractError
 from solarwm.inference import GeneratedSample, InferenceCase, encode_compare_mp4
 
 from .artifacts import H3ArtifactBatch
@@ -192,8 +193,13 @@ def package_proxy_generated(
     num_inference_steps: int,
     proxy_latents: Any,
     reference_latents: Any,
+    proxy_references: tuple[str, ...] = ("duv",),
 ) -> GeneratedSample:
-    """Decode and package proxy/prediction/target videos and a triptych panel."""
+    """Decode and package proxy/prediction/target videos and a side-by-side panel.
+
+    A legacy single proxy is ``proxy.mp4`` and the panel is ``proxy | prediction | target``;
+    several references are ``proxy_<name>.mp4`` each, in reference order, left of the prediction.
+    """
 
     import torch
     import torch.nn.functional as F
@@ -204,27 +210,33 @@ def package_proxy_generated(
     if target.ndim == 4:
         target = target.unsqueeze(0)
     target_decoded = decode_h3_latents(video_vae, target, device=device)
-    proxy = proxy_latents
-    if proxy.ndim == 4:
-        proxy = proxy.unsqueeze(0)
-    proxy_decoded = decode_h3_latents(video_vae, proxy, device=device)
-    proxy_frames = proxy_decoded.permute(0, 2, 1, 3, 4).reshape(
-        -1, 3, int(proxy_decoded.shape[-2]), int(proxy_decoded.shape[-1])
-    )
-    proxy_frames = F.interpolate(
-        proxy_frames,
-        size=(int(generated.shape[-2]), int(generated.shape[-1])),
-        mode="bilinear",
-        align_corners=False,
-    )
-    proxy_decoded = proxy_frames.reshape(
-        1,
-        int(generated.shape[2]),
-        3,
-        int(generated.shape[-2]),
-        int(generated.shape[-1]),
-    ).permute(0, 2, 1, 3, 4)
-    panel = torch.cat((proxy_decoded, generated, target_decoded), dim=-1)
+    proxies = proxy_latents.unsqueeze(0) if proxy_latents.ndim == 4 else proxy_latents
+    names = tuple(proxy_references)
+    if len(names) != int(proxies.shape[0]):
+        raise BackendContractError(
+            f"H3 proxy panel got {int(proxies.shape[0])} proxy latents for references {list(names)}"
+        )
+    single = len(names) == 1
+    proxy_videos: dict[str, Any] = {}
+    for index, name in enumerate(names):
+        proxy_decoded = decode_h3_latents(video_vae, proxies[index : index + 1], device=device)
+        proxy_frames = proxy_decoded.permute(0, 2, 1, 3, 4).reshape(
+            -1, 3, int(proxy_decoded.shape[-2]), int(proxy_decoded.shape[-1])
+        )
+        proxy_frames = F.interpolate(
+            proxy_frames,
+            size=(int(generated.shape[-2]), int(generated.shape[-1])),
+            mode="bilinear",
+            align_corners=False,
+        )
+        proxy_videos["proxy" if single else f"proxy_{name}"] = proxy_frames.reshape(
+            1,
+            int(generated.shape[2]),
+            3,
+            int(generated.shape[-2]),
+            int(generated.shape[-1]),
+        ).permute(0, 2, 1, 3, 4)
+    panel = torch.cat((*proxy_videos.values(), generated, target_decoded), dim=-1)
     metrics = _finite_generation_metrics(
         latents=latents,
         decoded=generated,
@@ -236,7 +248,7 @@ def package_proxy_generated(
                 {"latents": latents.detach().to("cpu", dtype=torch.bfloat16)}
             ),
             "generated.mp4": _mp4_bytes(generated),
-            "proxy.mp4": _mp4_bytes(proxy_decoded),
+            **{f"{key}.mp4": _mp4_bytes(value) for key, value in proxy_videos.items()},
             "target.mp4": _mp4_bytes(target_decoded),
             "compare.mp4": _mp4_bytes(panel),
         },
@@ -252,7 +264,7 @@ def package_proxy_generated(
             "num_sigma_points": int(num_inference_steps),
             "video_shift": 12.0,
             "audio_shift": 3.0,
-            "panel_order": ["proxy", "prediction", "target"],
+            "panel_order": [*proxy_videos, "prediction", "target"],
         },
     )
 

@@ -174,6 +174,50 @@ new run later, keep its resolved initialization block and set
 full resume only when the data manifest and topology are unchanged and exact
 continuation is intended.
 
+### Ref2VA omni proxy (separate depth and semantic references)
+
+The proxy profile's canvas and reference set come from the config instead of
+being frozen at 768 x 1344 with one 192 x 336 DUV video. The time axis stays
+fixed (124 frames, 37 latents, 207 audio latents). The "omni" example
+`stage0p5-124f-ref2va-omni-704p-sp2.yaml` trains on a 1280 x 704 target with
+three references, all at the target's resolution:
+
+- `<Picture 1>`: the anchor, center-cropped to the target's framing and then
+  scaled to short edge 2048 (3712 x 2048, a 128 x 232 latent);
+- `<Video 1>`: a grey depth video (DUV's log-depth channel in all three
+  channels), latent `[24, 37, 44, 80]`;
+- `<Video 2>`: a flat-colour semantic video (the 12 CWM classes on a
+  3 x 2 x 2 RGB lattice), latent `[24, 37, 44, 80]`.
+
+The cache stores these as `proxy_latents` `[2, 24, 37, 44, 80]` with
+`info.proxy_references: [depth, semantic]`, and it uses the hash-locked FastVideo
+system role `w0_depth_semantic`, which names both videos. The reader requires
+`data.proxy_references`, the cached references and the role to agree, and the
+`model.latent_height/latent_width/rows_per_latent` fields to match the data
+canvas (44, 80, 880). An absent `data.proxy_references` means the legacy
+single `duv` video, whose encoder contract is unchanged.
+
+One omni document is about 108k rows: 32,560 target rows, 2 x 32,560 proxy
+rows, 7,424 anchor rows, plus the Qwen text. That is about 2.3 times a legacy
+proxy document, so the example uses SP2. Proxy training accepts SP 1, 2, 4 or 8.
+On 16 GPUs SP2 gives a global batch of 8, so the example runs 288 steps to see
+roughly the same number of samples as 144 legacy steps at batch 16.
+
+```bash
+cd /workspace/SolarWM && git pull
+torchrun --nnodes="$NNODES" --node-rank="$NODE_RANK" --nproc-per-node=8 \
+  --rdzv-backend=c10d --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
+  -m solarwm train \
+  --config configs/examples/minimax_h3/stage0p5-124f-ref2va-omni-704p-sp2.yaml \
+  --set data.data_path=/data/binghe/h3_proxy/cache/abot_720p_omni_704_qwen2 \
+  --set runtime.output_dir=/data/binghe/h3_proxy/solarwm-runs/abot-720p-omni-lora128
+```
+
+A legacy proxy LoRA can warm-start an omni run through
+`checkpoint.initialization`, because the LoRA targets are the same. A full
+`checkpoint.resume_from` across the two profiles is refused, because the
+encoder contract differs.
+
 ## Stage1 / Stage2 setup
 
 For training across stages, download the three EMA packages from the
@@ -315,6 +359,18 @@ vision-token rows while retaining the original anchor, caption, target, and
 noise. Static mode repeats the original proxy's first frame in both paths.
 The rendered proxy column and inference manifest identify the condition that
 was actually sampled.
+
+The Qwen vision rows are the runs tagged `VIDEO_TAG` (0) in
+`text_token_tags`; text is `TEXT_TAG` (1). Ablations before 2026-10-09 selected
+the runs tagged 1, so their "shuffled" and "static" arms replaced caption and
+label rows instead of the proxy's vision rows, while the proxy VAE latent was
+replaced correctly. Re-run those arms before drawing conclusions from them.
+With several proxy references, static mode freezes each video on its own first
+frame and first Qwen block.
+
+The omni example `infer-stage0p5-124f-ref2va-omni-704p-sp8.yaml` writes
+`proxy_depth.mp4` and `proxy_semantic.mp4` instead of `proxy.mp4`. Its panel
+order is `proxy_depth | proxy_semantic | prediction | target`.
 
 ### Stage2 SGF
 

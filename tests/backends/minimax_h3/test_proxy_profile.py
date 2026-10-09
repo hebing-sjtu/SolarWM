@@ -228,7 +228,8 @@ def test_proxy_ablation_changes_full_rate_and_qwen_proxy_only() -> None:
 
     from solarwm.backends.minimax_h3.proxy_ablation import apply_proxy_ablation
 
-    tags = torch.tensor([0, 1, 1, 0, 1, 1, 0, 1, 1, 0], dtype=torch.int64)
+    # FastVideo's convention: Qwen vision placeholders are VIDEO_TAG=0, text is TEXT_TAG=1.
+    tags = torch.tensor([1, 0, 0, 1, 0, 0, 1, 0, 0, 1], dtype=torch.int64)
 
     def batch(sample_id: str, offset: float) -> H3ProxyArtifactBatch:
         return H3ProxyArtifactBatch(
@@ -288,12 +289,12 @@ def test_proxy_ablation_fits_different_qwen_video_token_counts() -> None:
 
     primary = batch(
         "primary",
-        [0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0],
+        [1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1],
         0.0,
     )
     donor = batch(
         "donor",
-        [0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0],
+        [1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1],
         100.0,
     )
 

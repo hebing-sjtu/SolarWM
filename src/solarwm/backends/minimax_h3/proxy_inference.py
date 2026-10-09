@@ -123,6 +123,11 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
         else None
     )
     core = H3Ref2VAStage0p5Core(model, device, config)
+    panel_caption = (
+        "proxy"
+        if len(stream.references) == 1
+        else " | ".join(f"proxy_{name}" for name in stream.references)
+    )
     output_root = Path(str(config["runtime"]["output_dir"])).resolve() / "proxy-inference"
     noise_seed = int(config["validation"]["noise_seed"])
     inference_steps = int(config["validation"]["num_inference_steps"])
@@ -245,6 +250,7 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                         num_inference_steps=inference_steps,
                         proxy_latents=batch.proxy_latents,
                         reference_latents=batch.target_latents,
+                        proxy_references=stream.references,
                     )
 
                     class CachedAdapter:
@@ -284,7 +290,8 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                                     fps=24,
                                     format="mp4",
                                     caption=(
-                                        f"proxy | prediction | target; sample={batch.sample_id}; "
+                                        f"{panel_caption} | prediction | target; "
+                                        f"sample={batch.sample_id}; "
                                         f"ablation={ablation_mode}; donor={donor_sample_id}"
                                     ),
                                 )
