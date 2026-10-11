@@ -135,6 +135,48 @@ def test_pending_tasks_are_lowest_step_first_and_skip_done_or_exhausted(tmp_path
     assert [task.key for task in only] == ["a/step-000010/correct"]
 
 
+def test_final_ablations_run_only_at_last_and_base_steps(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    run = _run(runs, "a", complete=[5, 10])
+    (run / "resolved-config.json").write_text(json.dumps({"train": {"max_steps": 10}}))
+    _run(runs, "unresolved", complete=[5])
+    tasks = pending_tasks(
+        ["a", "unresolved"],
+        run_root=runs,
+        eval_dir=tmp_path / "evals",
+        steps=[],
+        ablations=["correct"],
+        failed={},
+        max_attempts=2,
+        final_ablations=["static"],
+        base=True,
+    )
+    assert [task.key for task in tasks] == [
+        "a/step-000000/correct",
+        "a/step-000000/static",
+        "a/step-000005/correct",
+        "unresolved/step-000005/correct",
+        "a/step-000010/correct",
+        "a/step-000010/static",
+    ]
+
+
+def test_base_eval_config_loads_no_checkpoint(tmp_path: Path) -> None:
+    config = eval_config(
+        load_config(MIXED_INFER).mutable_copy(),
+        load_config(MIXED).mutable_copy(),
+        task=EvalTask("omni-a", 0, "static"),
+        checkpoint=None,
+        eval_data="/data/heldout",
+        weight_source="live",
+        output_dir=tmp_path / "out",
+        loop="round2",
+    )
+    validate_h3_config(config)
+    assert config["checkpoint"]["resume_from"] is None
+    assert "base" in config["runtime"]["tracking"]["tags"]
+
+
 def test_eval_config_carries_trained_contract_and_validates(tmp_path: Path) -> None:
     trained = load_config(MIXED, ["data.align_proxy_reference_time=true"]).mutable_copy()
     infer = load_config(MIXED_INFER).mutable_copy()

@@ -45,11 +45,24 @@ def _checkpoint_dir(run_dir: Path, step: int) -> Path:
     return run_dir / f"checkpoint_model_{int(step):06d}"
 
 
+def _exists(path: Path) -> bool:
+    """Whether ``path`` exists, asked through a parent listing.
+
+    gcsfuse caches negative lookups, so a bare ``is_file()`` can keep answering "missing" for a
+    file another node wrote afterwards; listing the parent refreshes the entry.
+    """
+
+    try:
+        return path.name in os.listdir(path.parent)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def read_events(run_dir: Path) -> list[dict[str, Any]]:
     """Training events, skipping a torn last line that the writer may still be appending."""
 
     path = run_dir / "training-events.jsonl"
-    if not path.is_file():
+    if not _exists(path):
         return []
     events = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -70,13 +83,13 @@ def completed_checkpoints(
     rows = read_events(run_dir) if events is None else events
     steps = {int(row["step"]) for row in rows if row.get("event") == "checkpoint" and "step" in row}
     return sorted(
-        step for step in steps if (_checkpoint_dir(run_dir, step) / "COMPLETE.json").is_file()
+        step for step in steps if _exists(_checkpoint_dir(run_dir, step) / "COMPLETE.json")
     )
 
 
 def run_finished(run_dir: Path) -> bool:
     path = run_dir / "run-result.json"
-    if not path.is_file():
+    if not _exists(path):
         return False
     try:
         return json.loads(path.read_text(encoding="utf-8")).get("status") in {"complete", "failed"}
@@ -313,6 +326,8 @@ def command_train(args: argparse.Namespace) -> int:
 
 @dataclass(frozen=True)
 class EvalTask:
+    """One evaluation; step 0 is the base model with the run's data contract and no LoRA."""
+
     run: str
     step: int
     ablation: str
@@ -320,6 +335,13 @@ class EvalTask:
     @property
     def key(self) -> str:
         return f"{self.run}/step-{self.step:06d}/{self.ablation}"
+
+
+def _run_config(run_dir: Path) -> dict[str, Any] | None:
+    path = run_dir / "resolved-config.json"
+    if not _exists(path):
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def pending_tasks(
@@ -331,17 +353,28 @@ def pending_tasks(
     ablations: Sequence[str],
     failed: Mapping[str, int],
     max_attempts: int,
+    final_ablations: Sequence[str] = (),
+    base: bool = False,
 ) -> list[EvalTask]:
-    """Ready, not yet evaluated work, lowest step first so every run gets early feedback."""
+    """Ready, not yet evaluated work, lowest step first so every run gets early feedback.
+
+    ``final_ablations`` run only at the run's last step and at the base step.
+    """
 
     tasks = []
     for run in runs:
-        ready = completed_checkpoints(run_root / run)
+        run_dir = run_root / run
+        config = _run_config(run_dir) if base or final_ablations else None
+        ready = completed_checkpoints(run_dir)
+        if base and config is not None:
+            ready = [0, *ready]
+        final = int(config["train"]["max_steps"]) if config is not None else None
         wanted = [step for step in ready if not steps or step in steps]
         for step in wanted:
-            for ablation in ablations:
+            extra = tuple(final_ablations) if step in {0, final} else ()
+            for ablation in dict.fromkeys((*ablations, *extra)):
                 task = EvalTask(run, step, ablation)
-                if (eval_dir / task.key / "DONE.json").is_file():
+                if _exists(eval_dir / task.key / "DONE.json"):
                     continue
                 if failed.get(task.key, 0) >= max_attempts:
                     continue
@@ -357,7 +390,7 @@ def eval_config(
     run_config: Mapping[str, Any],
     *,
     task: EvalTask,
-    checkpoint: Path,
+    checkpoint: Path | None,
     eval_data: str | None,
     weight_source: str,
     output_dir: Path,
@@ -372,19 +405,18 @@ def eval_config(
         config["data"]["data_path"] = eval_data
     config["name"] = f"{config.get('name', 'h3-proxy-infer')}-{task.run}"
     config.setdefault("checkpoint", {})
-    config["checkpoint"]["resume_from"] = str(checkpoint)
+    config["checkpoint"]["resume_from"] = None if checkpoint is None else str(checkpoint)
     config["checkpoint"]["weight_source"] = weight_source
     config.setdefault("validation", {})["proxy_ablation"] = task.ablation
     config["runtime"]["output_dir"] = str(output_dir)
     tracking = config["runtime"].setdefault("tracking", {})
+    step_tag = "base" if checkpoint is None else f"step-{task.step}"
     tracking.update(
         {
             "run_name": f"{task.run}-s{task.step}-{task.ablation}",
             "group": loop,
             "run_id": None,
-            "tags": sorted(
-                {*tracking.get("tags", []), task.run, task.ablation, f"step-{task.step}"}
-            ),
+            "tags": sorted({*tracking.get("tags", []), task.run, task.ablation, step_tag}),
         }
     )
     return config
@@ -417,7 +449,7 @@ def _task_config(task: EvalTask, args: argparse.Namespace, output_dir: Path) -> 
         _load(Path(args.infer_config), args.set, validate=False),
         run_config,
         task=task,
-        checkpoint=_checkpoint_dir(run_dir, task.step),
+        checkpoint=_checkpoint_dir(run_dir, task.step) if task.step else None,
         eval_data=args.eval_data,
         weight_source=args.weight_source,
         output_dir=output_dir,
@@ -457,8 +489,8 @@ def run_eval_task(task: EvalTask, args: argparse.Namespace, env: Mapping[str, st
         destination / "DONE.json",
         {
             "task": task.key,
-            "checkpoint": str(_checkpoint_dir(run_dir, task.step)),
-            "weight_source": args.weight_source,
+            "checkpoint": str(_checkpoint_dir(run_dir, task.step)) if task.step else None,
+            "weight_source": args.weight_source if task.step else "base",
             "samples": summary.get("samples", []),
             "seconds": round(time.time() - started),
         },
@@ -467,16 +499,17 @@ def run_eval_task(task: EvalTask, args: argparse.Namespace, env: Mapping[str, st
 
 
 def command_eval_worker(args: argparse.Namespace) -> int:
-    for ablation in args.ablations:
+    for ablation in (*args.ablations, *args.final_ablations):
         if ablation not in ABLATIONS:
             raise SystemExit(f"--ablations must be drawn from {list(ABLATIONS)}")
     eval_dir = Path(args.eval_root) / args.loop
     failures_path = eval_dir / "failures.json"
     failed: dict[str, int] = (
-        json.loads(failures_path.read_text(encoding="utf-8")) if failures_path.is_file() else {}
+        json.loads(failures_path.read_text(encoding="utf-8")) if _exists(failures_path) else {}
     )
-    if args.plan:
-        tasks = pending_tasks(
+
+    def pending() -> list[EvalTask]:
+        return pending_tasks(
             args.runs,
             run_root=Path(args.run_root),
             eval_dir=eval_dir,
@@ -484,12 +517,18 @@ def command_eval_worker(args: argparse.Namespace) -> int:
             ablations=args.ablations,
             failed=failed,
             max_attempts=args.max_attempts,
+            final_ablations=args.final_ablations,
+            base=args.base,
         )
+
+    if args.plan:
+        tasks = pending()
         for task in tasks:
             config = _task_config(task, args, LOCAL_ROOT / "evals" / args.loop / task.key)
             print(
                 f"{task.key}  data={config['data']['data_path']}  "
                 f"align={config['data']['align_proxy_reference_time']}  "
+                f"checkpoint={config['checkpoint']['resume_from']}  "
                 f"weights={config['checkpoint']['weight_source']}"
             )
         print(f"[h3-loop] {len(tasks)} pending; failures={failed}")
@@ -498,15 +537,7 @@ def command_eval_worker(args: argparse.Namespace) -> int:
     if not args.no_warm:
         warm_model_shards()
     while True:
-        tasks = pending_tasks(
-            args.runs,
-            run_root=Path(args.run_root),
-            eval_dir=eval_dir,
-            steps=args.steps,
-            ablations=args.ablations,
-            failed=failed,
-            max_attempts=args.max_attempts,
-        )
+        tasks = pending()
         if tasks:
             task = tasks[0]
             if not run_eval_task(task, args, env):
@@ -625,6 +656,17 @@ def _parser() -> argparse.ArgumentParser:
         "--steps", nargs="*", type=int, default=[], help="empty means every checkpoint"
     )
     worker.add_argument("--ablations", nargs="+", default=["correct"])
+    worker.add_argument(
+        "--final-ablations",
+        nargs="*",
+        default=[],
+        help="extra ablations run only at each run's last step (and the base step)",
+    )
+    worker.add_argument(
+        "--base",
+        action="store_true",
+        help="also evaluate step 0: the base model under each run's data contract, no LoRA",
+    )
     worker.add_argument("--weight-source", choices=("ema", "live"), default="ema")
     worker.add_argument("--nproc", type=int, default=8)
     worker.add_argument("--poll-seconds", type=int, default=300)
