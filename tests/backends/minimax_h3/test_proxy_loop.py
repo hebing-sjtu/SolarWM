@@ -161,6 +161,30 @@ def test_final_ablations_run_only_at_last_and_base_steps(tmp_path: Path) -> None
     ]
 
 
+def test_run_eval_data_overrides_the_shared_held_out_cache(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    for name in ("a", "b"):
+        run = _run(runs, name, complete=[5])
+        (run / "resolved-config.json").write_text(json.dumps(load_config(MIXED).mutable_copy()))
+    args = proxy_loop._parser().parse_args(
+        [
+            *["eval-worker", "--loop", "r2", "--runs", "a", "b", "--eval-data", "/data/shared"],
+            *("--run-eval-data", "b=/data/described"),
+            *("--infer-config", str(MIXED_INFER), "--run-root", str(runs)),
+        ]
+    )
+    paths = {
+        run: proxy_loop._task_config(EvalTask(run, 5, "correct"), args, tmp_path / run)["data"][
+            "data_path"
+        ]
+        for run in ("a", "b")
+    }
+    assert paths == {"a": "/data/shared", "b": "/data/described"}
+    args.run_eval_data = ["c=/data/x"]
+    with pytest.raises(SystemExit, match="not in --runs"):
+        proxy_loop._eval_data_by_run(args)
+
+
 def test_base_eval_config_loads_no_checkpoint(tmp_path: Path) -> None:
     config = eval_config(
         load_config(MIXED_INFER).mutable_copy(),

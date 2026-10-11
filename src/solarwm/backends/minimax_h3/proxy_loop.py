@@ -440,6 +440,18 @@ def _copy_tree(source: Path, destination: Path) -> None:
             shutil.copyfile(item, target)
 
 
+def _eval_data_by_run(args: argparse.Namespace) -> dict[str, str]:
+    mapping = {}
+    for item in getattr(args, "run_eval_data", None) or ():
+        run, separator, path = item.partition("=")
+        if not separator or not run or not path:
+            raise SystemExit(f"--run-eval-data expects RUN=PATH, got {item!r}")
+        if run not in args.runs:
+            raise SystemExit(f"--run-eval-data names {run!r}, which is not in --runs")
+        mapping[run] = path
+    return mapping
+
+
 def _task_config(task: EvalTask, args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
     from .config import validate_h3_config
 
@@ -450,7 +462,7 @@ def _task_config(task: EvalTask, args: argparse.Namespace, output_dir: Path) -> 
         run_config,
         task=task,
         checkpoint=_checkpoint_dir(run_dir, task.step) if task.step else None,
-        eval_data=args.eval_data,
+        eval_data=_eval_data_by_run(args).get(task.run, args.eval_data),
         weight_source=args.weight_source,
         output_dir=output_dir,
         loop=args.loop,
@@ -651,6 +663,13 @@ def _parser() -> argparse.ArgumentParser:
     worker.add_argument("--infer-config", required=True)
     worker.add_argument(
         "--eval-data", help="held-out cache; defaults to the run's training data_path"
+    )
+    worker.add_argument(
+        "--run-eval-data",
+        action="append",
+        default=[],
+        metavar="RUN=PATH",
+        help="held-out cache for one run, overriding --eval-data (e.g. differently encoded text)",
     )
     worker.add_argument(
         "--steps", nargs="*", type=int, default=[], help="empty means every checkpoint"
