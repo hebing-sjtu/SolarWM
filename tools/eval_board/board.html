@@ -98,6 +98,7 @@ td .d { display: block; font-size: 11px; }
   <button id="playall" title="空格键">▶ 播放可见行</button>
   <span class="spacer"></span>
   <button id="fresh"></button>
+  <span id="reports"></span>
   <span id="stamp" class="dim"></span>
 </header>
 <main>
@@ -586,6 +587,8 @@ function adopt(data) {
   ORDER = new Map(DATA.tasks.map((t, i) => [t.id, i]));
   const n = DATA.tasks.reduce((a, t) => a + Object.keys(t.items).length, 0);
   $("stamp").textContent = `${DATA.tasks.length} 个任务 · ${n} 个视频 · 数据导出于 ${new Date(DATA.generated_at).toLocaleString()}`;
+  $("reports").innerHTML = (DATA.reports || []).map((name) =>
+    `<a href="reports/${encodeURIComponent(name)}" target="_blank" style="color: var(--accent)">报告 ${esc(name.replace(/\.md$/, ""))}</a>`).join(" ");
   $("fresh").style.display = "none";
 }
 async function main() {

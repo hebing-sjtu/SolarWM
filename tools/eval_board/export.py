@@ -284,6 +284,7 @@ def export(args: argparse.Namespace) -> dict:
         "skip_frames": args.skip_frames,
         "samples": samples,
         "tasks": tasks,
+        "reports": sorted(name for name in listing(out / "reports") if name.endswith(".md")),
     }
     write_atomic(out / "index.json", json.dumps(index, ensure_ascii=False).encode("utf-8"))
     write_atomic(out / "index.html", (HERE / "board.html").read_bytes())

@@ -20,7 +20,12 @@ from urllib.parse import unquote, urlparse
 
 CHUNK = 1 << 20
 RANGE = re.compile(r"bytes=(\d*)-(\d*)$")
-TYPES = {".mp4": "video/mp4", ".json": "application/json", ".html": "text/html; charset=utf-8"}
+TYPES = {
+    ".mp4": "video/mp4",
+    ".json": "application/json",
+    ".html": "text/html; charset=utf-8",
+    ".md": "text/plain; charset=utf-8",
+}
 
 
 class Server(socketserver.ThreadingMixIn, HTTPServer):

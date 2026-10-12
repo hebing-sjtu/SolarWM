@@ -121,6 +121,60 @@ def test_export_dedupes_media_scores_tasks_and_reruns_without_encoding(tmp_path)
     assert {p.name: p.stat().st_mtime_ns for p in (out / "media").iterdir()} == stamps
 
 
+def test_report_pairs_deltas_per_group_and_lists_tasks_not_evaluated_yet(tmp_path):
+    report = load("report")
+    index = {
+        "generated_at": "2026-10-13T00:00:00+00:00",
+        "samples": {
+            "s1": {"kind": "color", "modality": "duv"},
+            "s2": {"kind": "high", "modality": "depth"},
+        },
+        "tasks": [
+            {
+                "id": "a",
+                "items": {
+                    "s1": {"psnr_late": 20.0, "ssim_late": 0.5},
+                    "s2": {"psnr_late": 18.0, "ssim_late": 0.4},
+                },
+            },
+            {
+                "id": "b",
+                "items": {
+                    "s1": {"psnr_late": 19.0, "ssim_late": 0.5},
+                    "s2": {"psnr_late": 18.5, "ssim_late": 0.4},
+                },
+            },
+        ],
+    }
+    path = tmp_path / "index.json"
+    path.write_text(json.dumps(index))
+    out = tmp_path / "reports" / "r.md"
+    argv = [
+        "--index",
+        str(path),
+        "--task",
+        "A=a",
+        "--task",
+        "B=b",
+        "--task",
+        "C=c",
+        "--pair",
+        "A:B",
+        "--out",
+        str(out),
+    ]
+    assert report.main(argv) == 0
+    text = out.read_text()
+    assert "Not evaluated yet: `C`." in text
+    row = next(
+        line for line in text.splitlines() if line.startswith("| `A` - `B`") and "+0.25" in line
+    )
+    cells = [cell.strip() for cell in row.strip("|").split("|")]
+    assert cells[1:4] == ["+0.25 ± 0.75 (1/2)", "+1.00 ± 0.00 (1/1)", "-0.50 ± 0.00 (0/1)"]
+    with pytest.raises(SystemExit):
+        report.main([*argv[:-2], "--pair", "A:Z", "--out", str(out)])
+
+
 def test_serve_ranges_and_refuses_paths_outside_the_board(tmp_path):
     serve = load("serve")
     (tmp_path / "media").mkdir()

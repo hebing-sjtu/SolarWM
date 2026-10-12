@@ -2,7 +2,8 @@
 """Mirror an exported eval board from a BCS pod to this host, fetching only what is missing.
 
 Media files are content-addressed and never rewritten, so a name with the same size is already
-here. A new index.json replaces the old one only once every video it names is here, so the page
+here; the few other files (reports) are rewritten in place and so are fetched on every pass.
+A new index.json replaces the old one only once every video it names is here, so the page
 never points at a missing file. Pods have no rsync, so files travel as tar streams over
 `kubectl exec`; those streams can drop mid-transfer, so batches are kept small and whatever
 arrived whole is kept. Nothing here is ever deleted.
@@ -89,6 +90,10 @@ def missing(remote, local_root):
     return wanted
 
 
+def media(names):
+    return [name for name in names if name.startswith("media/")]
+
+
 def batches(names, sizes, limit=BATCH_BYTES):
     batch, total = [], 0
     for name in names:
@@ -168,14 +173,17 @@ def sync_once(args):
     remote = remote_files(pod, args)
     if "index.json" not in remote:
         raise RuntimeError(f"{pod}:{args.remote} has no index.json yet")
-    wanted = missing(remote, args.local)
+    wanted = media(missing(remote, args.local))
     total = len(wanted)
     for _ in range(ATTEMPTS):
         if not wanted:
             break
         for batch in batches(wanted, remote):
             fetch_media(pod, batch, remote, args)
-        wanted = missing(remote, args.local)
+        wanted = media(missing(remote, args.local))
+    others = sorted(name for name in remote if name not in INDEX and name not in media(remote))
+    if others:
+        fetch_media(pod, others, remote, args)
     problem = fetch_index(pod, args)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     print(
