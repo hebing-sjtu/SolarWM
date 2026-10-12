@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H3 proxy 评测对比台</title>
+<style>
+:root {
+  --bg: #0f1216; --panel: #171b21; --panel2: #1e232b; --line: #2b323c; --text: #e4e8ee;
+  --dim: #8a94a3; --accent: #4c9aff; --good: #3fb950; --bad: #f85149; --cell: 360px;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 13px/1.45 -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; }
+button, select, input { font: inherit; color: inherit; }
+button, select { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 9px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+input[type=text] { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 4px 8px; width: 100%; }
+.dim { color: var(--dim); }
+header { position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; gap: 8px 16px;
+  align-items: center; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header h1 { font-size: 15px; margin: 0; }
+header label { display: flex; align-items: center; gap: 6px; }
+.tabs { display: flex; gap: 4px; }
+.spacer { flex: 1; }
+#fresh { display: none; }
+main { display: flex; align-items: flex-start; }
+aside { width: 300px; flex: none; position: sticky; top: 45px; height: calc(100vh - 45px);
+  overflow: auto; padding: 8px 12px 40px; background: var(--panel); border-right: 1px solid var(--line); }
+aside h3 { font-size: 12px; color: var(--dim); font-weight: 600; margin: 14px 0 6px;
+  text-transform: uppercase; letter-spacing: .04em; }
+aside label { display: block; padding: 1px 0; cursor: pointer; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.chips button { padding: 1px 8px; font-size: 12px; }
+.presets { display: flex; flex-direction: column; gap: 4px; }
+.presets button { text-align: left; }
+.group { border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px; background: var(--panel2); }
+.group > div:first-child { display: flex; justify-content: space-between; gap: 6px; padding: 4px 8px;
+  font-weight: 600; cursor: pointer; }
+.group .loop { font-weight: 400; font-size: 11px; color: var(--dim); }
+.group .items { padding: 2px 8px 6px; }
+.group .items label { font-size: 12px; }
+#content { flex: 1; min-width: 0; padding: 12px 14px 80px; }
+.summary { color: var(--dim); margin-bottom: 10px; }
+.row { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 14px;
+  padding: 8px 10px 10px; }
+.row.focus { border-color: var(--accent); }
+.rowhead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-bottom: 6px; }
+.rowhead .sid { font-weight: 600; font-family: ui-monospace, Menlo, monospace; }
+.tag { font-size: 11px; padding: 0 6px; border-radius: 10px; background: var(--panel2);
+  border: 1px solid var(--line); color: var(--dim); }
+.tag.mod { color: #d2a8ff; } .tag.kind { color: #79c0ff; }
+.caption { color: var(--dim); font-size: 12px; margin: 0 0 6px; max-width: 1400px; }
+.controls { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.controls input[type=range] { flex: 1; max-width: 520px; }
+.controls .frame { font-family: ui-monospace, Menlo, monospace; min-width: 92px; color: var(--dim); }
+.cells { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+.cell { flex: none; width: var(--cell); }
+.cell .cap { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cell .cap .abl { color: var(--dim); }
+.cell video, .cell .empty { width: 100%; aspect-ratio: 1280 / 704; background: #000; border-radius: 4px;
+  display: block; cursor: zoom-in; border: 2px solid transparent; }
+.cell .empty { display: flex; align-items: center; justify-content: center; color: var(--dim); cursor: default; }
+.cell.best video { border-color: var(--good); }
+.cell .meta { font-size: 12px; font-family: ui-monospace, Menlo, monospace; display: flex; gap: 8px; }
+.up { color: var(--good); } .down { color: var(--bad); }
+table { border-collapse: collapse; font-size: 12px; }
+th, td { border: 1px solid var(--line); padding: 3px 7px; text-align: right; white-space: nowrap; }
+th { background: var(--panel2); position: sticky; top: 45px; z-index: 2; }
+td.name, th.name { text-align: left; }
+tr.sel td.name { color: var(--accent); }
+tr:hover td { background: #ffffff08; }
+td .d { display: block; font-size: 11px; }
+.heat td { cursor: pointer; font-family: ui-monospace, Menlo, monospace; }
+.heat th.col { white-space: normal; min-width: 90px; max-width: 140px; vertical-align: bottom; }
+#modal { position: fixed; inset: 0; background: #000d; z-index: 50; display: none; flex-direction: column;
+  padding: 16px; }
+#modal.open { display: flex; }
+#modal .cells { flex: 1; justify-content: center; align-items: flex-start; }
+#modal .cell { width: min(48vw, 1280px); }
+.note { color: var(--dim); font-size: 12px; margin: 6px 0 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>H3 proxy 评测对比台</h1>
+  <nav class="tabs" id="tabs">
+    <button data-view="compare">视频对比</button>
+    <button data-view="table">指标汇总</button>
+    <button data-view="heat">逐样本指标</button>
+  </nav>
+  <label>指标 <select id="metric"></select></label>
+  <label>参照列 <select id="ref"></select></label>
+  <label>视频宽 <input id="width" type="range" min="200" max="960" step="20"></label>
+  <button id="playall" title="空格键">▶ 播放可见行</button>
+  <span class="spacer"></span>
+  <button id="fresh"></button>
+  <span id="stamp" class="dim"></span>
+</header>
+<main>
+  <aside>
+    <h3>预设</h3>
+    <div class="presets" id="presets"></div>
+    <h3>固定列</h3>
+    <label><input type="checkbox" id="show-target"> 真值视频 (target)</label>
+    <label><input type="checkbox" id="show-proxy"> 参考视频 (proxy，按 ablation)</label>
+    <h3>样本筛选</h3>
+    <div class="chips" id="f-mod"></div>
+    <div class="chips" id="f-kind"></div>
+    <input type="text" id="q" placeholder="搜索样本 id / caption">
+    <h3>排序</h3>
+    <select id="sort">
+      <option value="default">按样本 id</option>
+      <option value="ref-asc">参照列指标 低 → 高</option>
+      <option value="ref-desc">参照列指标 高 → 低</option>
+      <option value="spread">各列差异 大 → 小</option>
+    </select>
+    <h3>任务列 <span id="ncols" class="dim"></span></h3>
+    <div id="tree"></div>
+  </aside>
+  <div id="content"></div>
+</main>
+<div id="modal"></div>
+<script>
+"use strict";
+const METRICS = {
+  psnr_late: { name: "PSNR（第 24 帧起）", digits: 2, scale: 3 },
+  psnr_all: { name: "PSNR（全部帧）", digits: 2, scale: 3 },
+  ssim_late: { name: "SSIM（第 24 帧起）", digits: 3, scale: 0.05 },
+  ssim_all: { name: "SSIM（全部帧）", digits: 3, scale: 0.05 },
+};
+const MODS = ["duv", "depth", "semantic", "style"];
+const KINDS = ["color", "high"];
+const KIND_HELP = { color: "目标为彩色 proxy 渲染", high: "目标为高保真游戏画面" };
+const ABL_NAME = { correct: "correct", static: "static（参考只用首帧）" };
+const BASE_GROUP = "base";
+
+let DATA = null, TASKS = new Map(), ORDER = new Map();
+const state = {
+  view: "compare", cols: [], metric: "psnr_late", ref: "", mod: new Set(), kind: new Set(),
+  q: "", sort: "default", target: true, proxy: true, width: 360, focus: "",
+};
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const mean = (xs) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+const fmt = (v, d) => v == null ? "–" : v.toFixed(d ?? METRICS[state.metric].digits);
+const signed = (v, d) => v == null ? "" : (v >= 0 ? "+" : "") + fmt(v, d);
+
+// ---------- state <-> URL ----------
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  if (p.has("v")) state.view = p.get("v");
+  if (p.has("c")) state.cols = p.get("c").split(",").filter(Boolean);
+  if (p.has("m") && METRICS[p.get("m")]) state.metric = p.get("m");
+  if (p.has("r")) state.ref = p.get("r");
+  if (p.has("mod")) state.mod = new Set(p.get("mod").split(",").filter(Boolean));
+  if (p.has("kind")) state.kind = new Set(p.get("kind").split(",").filter(Boolean));
+  if (p.has("q")) state.q = p.get("q");
+  if (p.has("s")) state.sort = p.get("s");
+  if (p.has("t")) state.target = p.get("t") === "1";
+  if (p.has("p")) state.proxy = p.get("p") === "1";
+  if (p.has("w")) state.width = +p.get("w") || 360;
+  return p.has("c");
+}
+function writeHash() {
+  const p = new URLSearchParams();
+  p.set("v", state.view); p.set("c", state.cols.join(",")); p.set("m", state.metric);
+  if (state.ref) p.set("r", state.ref);
+  if (state.mod.size) p.set("mod", [...state.mod].join(","));
+  if (state.kind.size) p.set("kind", [...state.kind].join(","));
+  if (state.q) p.set("q", state.q);
+  if (state.sort !== "default") p.set("s", state.sort);
+  p.set("t", state.target ? "1" : "0"); p.set("p", state.proxy ? "1" : "0"); p.set("w", state.width);
+  history.replaceState(null, "", "#" + p.toString());
+}
+
+// ---------- data helpers ----------
+const groupOf = (t) => t.step === 0 ? BASE_GROUP : t.loop + "/" + t.run;
+function selected() {
+  return state.cols.filter((id) => TASKS.has(id)).sort((a, b) => ORDER.get(a) - ORDER.get(b))
+    .map((id) => TASKS.get(id));
+}
+function value(task, sid) {
+  const item = task && task.items[sid];
+  return item && item[state.metric] != null ? item[state.metric] : null;
+}
+function sampleIds() {
+  const shown = new Set();
+  for (const t of DATA.tasks) for (const sid in t.items) shown.add(sid);
+  const q = state.q.trim().toLowerCase();
+  let ids = [...shown].filter((sid) => {
+    const s = DATA.samples[sid] || {};
+    if (state.mod.size && !state.mod.has(s.modality)) return false;
+    if (state.kind.size && !state.kind.has(s.kind)) return false;
+    if (q && !(sid.toLowerCase().includes(q) || (s.prompt || "").toLowerCase().includes(q))) return false;
+    return true;
+  }).sort();
+  const ref = TASKS.get(state.ref);
+  if ((state.sort === "ref-asc" || state.sort === "ref-desc") && ref) {
+    const sign = state.sort === "ref-asc" ? 1 : -1;
+    ids.sort((a, b) => sign * ((value(ref, a) ?? Infinity) - (value(ref, b) ?? Infinity)));
+  } else if (state.sort === "spread") {
+    const cols = selected();
+    const spread = (sid) => {
+      const vs = cols.map((t) => value(t, sid)).filter((v) => v != null);
+      return vs.length > 1 ? Math.max(...vs) - Math.min(...vs) : -1;
+    };
+    ids.sort((a, b) => spread(b) - spread(a));
+  }
+  return ids;
+}
+function finals() {
+  const last = new Map();
+  for (const t of DATA.tasks) {
+    if (t.step === 0) continue;
+    const key = t.loop + "/" + t.run;
+    last.set(key, Math.max(last.get(key) ?? 0, t.step));
+  }
+  return last;
+}
+function pick(pred) { return DATA.tasks.filter(pred).map((t) => t.id); }
+
+function presets() {
+  const last = finals();
+  const isFinal = (t) => t.step > 0 && last.get(t.loop + "/" + t.run) === t.step;
+  const list = [
+    ["原始模型 + 各实验最终步（correct）", () => pick((t) => t.ablation === "correct" && (t.step === 0 || isFinal(t)))],
+    ["各实验最终步（correct）", () => pick((t) => t.ablation === "correct" && isFinal(t))],
+    ["correct vs static（原始模型 + 最终步）", () => pick((t) => t.step === 0 || isFinal(t))],
+  ];
+  const runs = [...new Set(DATA.tasks.filter((t) => t.step > 0).map((t) => t.loop + "/" + t.run))];
+  for (const key of runs) {
+    const t0 = DATA.tasks.find((t) => t.loop + "/" + t.run === key);
+    list.push([t0.run_label + "：各 step（correct）",
+      () => pick((t) => t.loop + "/" + t.run === key && t.ablation === "correct")]);
+  }
+  return list;
+}
+
+// ---------- sidebar ----------
+function renderSidebar() {
+  const box = $("presets"); box.innerHTML = "";
+  for (const [name, fn] of presets()) {
+    const b = document.createElement("button"); b.textContent = name;
+    b.onclick = () => { state.cols = fn(); state.ref = state.cols[0] || ""; update(); };
+    box.append(b);
+  }
+  const clear = document.createElement("button"); clear.textContent = "清空任务列";
+  clear.onclick = () => { state.cols = []; update(); };
+  box.append(clear);
+
+  chips($("f-mod"), MODS, state.mod, (m) => m);
+  chips($("f-kind"), KINDS, state.kind, (k) => k, KIND_HELP);
+
+  const groups = new Map();
+  for (const t of DATA.tasks) {
+    const g = groupOf(t);
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(t);
+  }
+  const tree = $("tree"); tree.innerHTML = "";
+  const chosen = new Set(state.cols);
+  for (const [g, tasks] of groups) {
+    const div = document.createElement("div"); div.className = "group";
+    const title = g === BASE_GROUP ? "原始模型（无 LoRA）" : tasks[0].run_label;
+    const loop = g === BASE_GROUP ? "" : tasks[0].loop;
+    const n = tasks.filter((t) => chosen.has(t.id)).length;
+    div.innerHTML = `<div><span>${esc(title)} <span class="loop">${esc(loop)}</span></span>
+      <span class="dim">${n}/${tasks.length}</span></div><div class="items"></div>`;
+    div.firstElementChild.onclick = () => {
+      const ids = tasks.map((t) => t.id), all = ids.every((id) => chosen.has(id));
+      state.cols = all ? state.cols.filter((id) => !ids.includes(id)) : [...new Set([...state.cols, ...ids])];
+      update();
+    };
+    const items = div.lastElementChild;
+    for (const t of tasks) {
+      const label = document.createElement("label");
+      const text = g === BASE_GROUP ? t.label : "step " + t.step;
+      label.innerHTML = `<input type="checkbox" ${chosen.has(t.id) ? "checked" : ""}> ${esc(text)}
+        <span class="dim">· ${esc(t.ablation)} · ${Object.keys(t.items).length}</span>`;
+      label.firstElementChild.onchange = (e) => {
+        state.cols = e.target.checked ? [...state.cols, t.id] : state.cols.filter((id) => id !== t.id);
+        update();
+      };
+      items.append(label);
+    }
+    tree.append(div);
+  }
+  $("ncols").textContent = `已选 ${selected().length}`;
+
+  const ref = $("ref");
+  ref.innerHTML = `<option value="">（无）</option>` + DATA.tasks.map((t) =>
+    `<option value="${esc(t.id)}" ${t.id === state.ref ? "selected" : ""}>${esc(t.label)} · ${esc(t.ablation)}</option>`).join("");
+}
+function chips(box, values, set, name, help) {
+  box.innerHTML = "";
+  for (const v of values) {
+    const b = document.createElement("button"); b.textContent = name(v);
+    if (help) b.title = help[v];
+    b.className = set.has(v) ? "on" : "";
+    b.onclick = () => { set.has(v) ? set.delete(v) : set.add(v); update(); };
+    box.append(b);
+  }
+}
+
+// ---------- synchronized playback ----------
+class Sync {
+  constructor(videos, ui) {
+    this.videos = videos; this.ui = ui; this.playing = false; this.rate = 1;
+    this.duration = (DATA.frames || 124) / DATA.fps;
+    for (const v of videos) v.addEventListener("loadedmetadata", () => {
+      if (v.duration && isFinite(v.duration)) this.duration = v.duration;
+      if (v !== this.master()) v.currentTime = this.time();
+    });
+  }
+  live() { return this.videos.filter((v) => v.getAttribute("src")); }
+  master() { return this.live().find((v) => v.readyState >= 1) || this.videos[0]; }
+  time() { const m = this.master(); return m ? m.currentTime : 0; }
+  play() {
+    this.playing = true;
+    for (const v of this.live()) { v.playbackRate = this.rate; v.play().catch(() => {}); }
+    this.ui.button.textContent = "⏸"; this.tick();
+  }
+  pause() {
+    this.playing = false; const t = this.time();
+    for (const v of this.live()) { v.pause(); v.currentTime = t; }
+    this.ui.button.textContent = "▶"; this.show(t);
+  }
+  toggle() { this.playing ? this.pause() : this.play(); }
+  seek(t) { for (const v of this.live()) v.currentTime = t; this.show(t); }
+  step(frames) { this.pause(); this.seek(Math.min(Math.max(this.time() + frames / DATA.fps, 0), this.duration - 0.001)); }
+  setRate(r) { this.rate = r; for (const v of this.live()) v.playbackRate = r; }
+  tick() {
+    if (!this.playing) return;
+    const m = this.master(), t = m ? m.currentTime : 0;
+    for (const v of this.live()) {
+      if (v === m || v.readyState < 2) continue;
+      if (Math.abs(v.currentTime - t) > 0.08) v.currentTime = t;
+      if (v.paused) v.play().catch(() => {});
+    }
+    this.show(t);
+    requestAnimationFrame(() => this.tick());
+  }
+  show(t) {
+    const frames = Math.round(this.duration * DATA.fps);
+    this.ui.slider.value = Math.round((t / this.duration) * 1000);
+    this.ui.frame.textContent = `帧 ${Math.min(Math.floor(t * DATA.fps + 1e-3), frames - 1)}/${frames}`;
+  }
+}
+function controls(container) {
+  const div = document.createElement("div"); div.className = "controls";
+  div.innerHTML = `<button title="上一帧">⏮</button><button>▶</button><button title="下一帧">⏭</button>
+    <input type="range" min="0" max="1000" value="0"><span class="frame"></span>
+    <select title="播放速度"><option>0.25</option><option>0.5</option><option selected>1</option></select>`;
+  container.append(div);
+  const [prev, play, next] = div.querySelectorAll("button");
+  return { div, prev, button: play, next, slider: div.querySelector("input"), frame: div.querySelector(".frame"),
+    rate: div.querySelector("select") };
+}
+function wire(sync) {
+  const ui = sync.ui;
+  ui.button.onclick = () => sync.toggle();
+  ui.prev.onclick = () => sync.step(-1);
+  ui.next.onclick = () => sync.step(1);
+  ui.slider.oninput = () => { sync.pause(); sync.seek((ui.slider.value / 1000) * sync.duration); };
+  ui.rate.onchange = () => sync.setRate(+ui.rate.value);
+  sync.show(0);
+}
+
+// ---------- compare view ----------
+let observer = null;
+const rows = new Map();
+function cell(caption, src, meta, cls) {
+  const div = document.createElement("div"); div.className = "cell " + (cls || "");
+  div.innerHTML = `<div class="cap" title="${esc(caption.replace(/<[^>]+>/g, ""))}">${caption}</div>`;
+  if (src) {
+    const v = document.createElement("video");
+    v.muted = true; v.loop = true; v.playsInline = true; v.preload = "auto"; v.dataset.src = src;
+    div.append(v);
+  } else {
+    div.insertAdjacentHTML("beforeend", `<div class="empty">尚未生成</div>`);
+  }
+  div.insertAdjacentHTML("beforeend", `<div class="meta">${meta || "&nbsp;"}</div>`);
+  return div;
+}
+function metaFor(task, sid, ref) {
+  const item = task.items[sid];
+  if (!item) return "";
+  const d = METRICS[state.metric].digits;
+  const v = item[state.metric], r = ref && ref !== task ? value(ref, sid) : null;
+  const delta = v != null && r != null ? v - r : null;
+  const other = state.metric.startsWith("psnr") ? state.metric.replace("psnr", "ssim") : state.metric.replace("ssim", "psnr");
+  const o = item[other];
+  return `<span>${fmt(v, d)}</span>` +
+    (delta != null ? `<span class="${delta >= 0 ? "up" : "down"}">${signed(delta, d)}</span>` : "") +
+    `<span class="dim">${other.startsWith("ssim") ? "SSIM" : "PSNR"} ${fmt(o, METRICS[other].digits)}</span>`;
+}
+function rowCard(sid, cols, ref) {
+  const s = DATA.samples[sid] || {};
+  const card = document.createElement("div"); card.className = "row"; card.id = "row-" + sid;
+  card.innerHTML = `<div class="rowhead"><span class="sid">${esc(sid)}</span>
+    ${s.modality ? `<span class="tag mod">${esc(s.modality)}</span>` : ""}
+    ${s.kind ? `<span class="tag kind" title="${esc(KIND_HELP[s.kind] || "")}">${esc(s.kind)}</span>` : ""}
+    ${s.tag ? `<span class="tag">${esc(s.tag)}</span>` : ""}</div>
+    ${s.prompt ? `<p class="caption">${esc(s.prompt)}</p>` : ""}`;
+  const ui = controls(card);
+  const grid = document.createElement("div"); grid.className = "cells"; card.append(grid);
+  if (state.target) grid.append(cell("真值 target", s.target, "", ""));
+  if (state.proxy) {
+    const ablations = [...new Set(cols.map((t) => t.ablation))];
+    for (const a of (ablations.length ? ablations : ["correct"])) {
+      if (s.proxy && s.proxy[a]) grid.append(cell(`参考 proxy <span class="abl">· ${esc(a)}</span>`, s.proxy[a], ""));
+    }
+  }
+  const values = cols.map((t) => value(t, sid)).filter((v) => v != null);
+  const best = values.length > 1 ? Math.max(...values) : null;
+  for (const t of cols) {
+    const item = t.items[sid];
+    const v = value(t, sid);
+    grid.append(cell(`${esc(t.label)} <span class="abl">· ${esc(t.ablation)}</span>`,
+      item && item.video, metaFor(t, sid, ref), v != null && v === best ? "best" : ""));
+  }
+  const videos = [...grid.querySelectorAll("video")];
+  const sync = new Sync(videos, ui); wire(sync);
+  for (const v of videos) v.onclick = () => zoom(card, v, sync);
+  rows.set(card, sync);
+  return card;
+}
+function attach(card, on) {
+  const sync = rows.get(card);
+  for (const v of sync.videos) {
+    if (on && !v.getAttribute("src")) { v.src = v.dataset.src; }
+    if (!on && v.getAttribute("src")) { v.pause(); v.removeAttribute("src"); v.load(); }
+  }
+  if (!on) { sync.playing = false; sync.ui.button.textContent = "▶"; }
+}
+function renderCompare(root) {
+  const cols = selected(), ref = TASKS.get(state.ref), ids = sampleIds();
+  root.insertAdjacentHTML("beforeend", `<div class="summary">${ids.length} 个样本 × ${cols.length} 个任务列。
+    绿框 = 该行指标最高；彩色数字 = 相对参照列的差值。点击视频放大，空格键播放/暂停可见行。</div>`);
+  if (!cols.length) root.insertAdjacentHTML("beforeend", `<div class="note">左侧还没有选任务列，只显示真值和参考视频。</div>`);
+  if (observer) observer.disconnect();
+  observer = new IntersectionObserver((entries) => {
+    for (const e of entries) attach(e.target, e.isIntersecting);
+  }, { rootMargin: "800px 0px" });
+  for (const sid of ids) {
+    const card = rowCard(sid, cols, ref);
+    if (sid === state.focus) card.classList.add("focus");
+    root.append(card); observer.observe(card);
+  }
+  if (state.focus) {
+    const card = document.getElementById("row-" + state.focus);
+    if (card) requestAnimationFrame(() => card.scrollIntoView({ block: "center" }));
+    state.focus = "";
+  }
+}
+function zoom(card, video, rowSync) {
+  rowSync.pause();
+  const sid = card.id.slice(4), s = DATA.samples[sid] || {};
+  const modal = $("modal"); modal.innerHTML = ""; modal.classList.add("open");
+  const head = document.createElement("div"); head.className = "rowhead";
+  head.innerHTML = `<span class="sid">${esc(sid)}</span><span class="dim">与真值并排；Esc 或点击空白处关闭</span>`;
+  modal.append(head);
+  const ui = controls(modal);
+  const grid = document.createElement("div"); grid.className = "cells"; modal.append(grid);
+  const clicked = video.closest(".cell").cloneNode(true); clicked.className = "cell";
+  grid.append(clicked);
+  if (s.target && video.dataset.src !== s.target) grid.append(cell("真值 target", s.target, ""));
+  const videos = [...grid.querySelectorAll("video")];
+  for (const v of videos) { v.src = v.dataset.src; v.style.cursor = "default"; }
+  const sync = new Sync(videos, ui); wire(sync); sync.seek(rowSync.time()); sync.play();
+  const close = () => {
+    sync.pause();
+    for (const v of videos) { v.removeAttribute("src"); v.load(); }
+    modal.classList.remove("open"); modal.innerHTML = ""; modal.close = null;
+  };
+  modal.onclick = (e) => { if (e.target === modal || e.target === grid) close(); };
+  modal.close = close;
+}
+
+// ---------- table view ----------
+function renderTable(root) {
+  const ids = sampleIds(), ref = TASKS.get(state.ref), d = METRICS[state.metric].digits;
+  const groups = [["ALL", () => true], ...KINDS.map((k) => [k, (s) => s.kind === k]),
+    ...MODS.map((m) => [m, (s) => s.modality === m])];
+  const sel = new Set(state.cols);
+  root.insertAdjacentHTML("beforeend", `<div class="note">${METRICS[state.metric].name} 的样本均值，
+    只计入左侧筛选后的 ${ids.length} 个样本。小字为与参照列的配对差值（同一批样本逐个相减再平均）及“更好的样本数/共有样本数”。
+    勾选行即加入/移出视频对比的任务列。</div>`);
+  let html = `<table><thead><tr><th></th><th class="name">任务</th><th class="name">ablation</th>` +
+    groups.map(([g]) => `<th>${g}</th>`).join("") + `</tr></thead><tbody>`;
+  for (const t of DATA.tasks) {
+    html += `<tr class="${sel.has(t.id) ? "sel" : ""}" data-id="${esc(t.id)}"><td><input type="checkbox" ${sel.has(t.id) ? "checked" : ""}></td>
+      <td class="name">${esc(t.label)}</td><td class="name">${esc(t.ablation)}</td>`;
+    for (const [, test] of groups) {
+      const sids = ids.filter((sid) => test(DATA.samples[sid] || {}) && value(t, sid) != null);
+      const m = mean(sids.map((sid) => value(t, sid)));
+      let extra = "";
+      if (ref && ref !== t) {
+        const paired = sids.filter((sid) => value(ref, sid) != null);
+        const diffs = paired.map((sid) => value(t, sid) - value(ref, sid));
+        const dm = mean(diffs);
+        if (dm != null) extra = `<span class="d ${dm >= 0 ? "up" : "down"}">${signed(dm, d)} · ${diffs.filter((x) => x > 0).length}/${diffs.length}</span>`;
+      }
+      html += `<td title="n=${sids.length}">${fmt(m, d)}${extra}</td>`;
+    }
+    html += `</tr>`;
+  }
+  root.insertAdjacentHTML("beforeend", html + `</tbody></table>`);
+  for (const tr of root.querySelectorAll("tbody tr")) {
+    tr.querySelector("input").onchange = (e) => {
+      const id = tr.dataset.id;
+      state.cols = e.target.checked ? [...state.cols, id] : state.cols.filter((x) => x !== id);
+      update();
+    };
+  }
+}
+
+// ---------- heatmap view ----------
+function renderHeat(root) {
+  const ids = sampleIds(), cols = selected(), ref = TASKS.get(state.ref);
+  const { digits: d, scale } = METRICS[state.metric];
+  root.insertAdjacentHTML("beforeend", `<div class="note">每格为 ${METRICS[state.metric].name}。
+    ${ref ? "颜色 = 相对参照列的差值（绿好红差，±" + scale + " 饱和）" : "颜色 = 相对该行均值的差值"}。点击格子跳到该样本的视频对比。</div>`);
+  if (!cols.length) { root.insertAdjacentHTML("beforeend", `<div class="note">先在左侧选择任务列。</div>`); return; }
+  let html = `<table class="heat"><thead><tr><th class="name">样本</th><th class="name">模态</th><th class="name">目标</th>` +
+    cols.map((t) => `<th class="col">${esc(t.label)}<br><span class="dim">${esc(t.ablation)}</span></th>`).join("") + `</tr></thead><tbody>`;
+  const color = (delta) => {
+    if (delta == null) return "";
+    const a = Math.min(Math.abs(delta) / scale, 1) * 0.6;
+    return delta >= 0 ? `background: rgba(63,185,80,${a})` : `background: rgba(248,81,73,${a})`;
+  };
+  for (const sid of ids) {
+    const s = DATA.samples[sid] || {};
+    const vs = cols.map((t) => value(t, sid));
+    const rowMean = mean(vs.filter((v) => v != null));
+    html += `<tr><td class="name">${esc(sid)}</td><td class="name">${esc(s.modality)}</td><td class="name">${esc(s.kind)}</td>`;
+    cols.forEach((t, i) => {
+      const v = vs[i], base = ref ? value(ref, sid) : rowMean;
+      const style = ref === t ? "" : color(v != null && base != null ? v - base : null);
+      html += `<td data-sid="${esc(sid)}" style="${style}">${fmt(v, d)}</td>`;
+    });
+    html += `</tr>`;
+  }
+  html += `<tr><td class="name"><b>均值</b></td><td></td><td></td>` +
+    cols.map((t) => `<td><b>${fmt(mean(ids.map((sid) => value(t, sid)).filter((v) => v != null)), d)}</b></td>`).join("") + `</tr>`;
+  root.insertAdjacentHTML("beforeend", html + `</tbody></table>`);
+  for (const td of root.querySelectorAll("td[data-sid]")) {
+    td.onclick = () => { state.view = "compare"; state.focus = td.dataset.sid; update(); };
+  }
+}
+
+// ---------- shell ----------
+function update() {
+  writeHash();
+  document.documentElement.style.setProperty("--cell", state.width + "px");
+  for (const b of $("tabs").children) b.className = b.dataset.view === state.view ? "on" : "";
+  $("metric").value = state.metric; $("sort").value = state.sort; $("q").value = state.q;
+  $("show-target").checked = state.target; $("show-proxy").checked = state.proxy; $("width").value = state.width;
+  renderSidebar();
+  const root = $("content");
+  if (observer) observer.disconnect();
+  for (const card of rows.keys()) attach(card, false);
+  rows.clear(); root.innerHTML = "";
+  if (state.view === "table") renderTable(root);
+  else if (state.view === "heat") renderHeat(root);
+  else renderCompare(root);
+}
+function visibleSyncs() {
+  const h = window.innerHeight;
+  return [...rows].filter(([card]) => { const r = card.getBoundingClientRect(); return r.bottom > 0 && r.top < h; })
+    .map(([, sync]) => sync);
+}
+async function fetchIndex() {
+  const r = await fetch("index.json", { cache: "no-cache" });
+  if (!r.ok) throw new Error("index.json: HTTP " + r.status);
+  return r.json();
+}
+function adopt(data) {
+  DATA = data;
+  TASKS = new Map(DATA.tasks.map((t) => [t.id, t]));
+  ORDER = new Map(DATA.tasks.map((t, i) => [t.id, i]));
+  const n = DATA.tasks.reduce((a, t) => a + Object.keys(t.items).length, 0);
+  $("stamp").textContent = `${DATA.tasks.length} 个任务 · ${n} 个视频 · 数据导出于 ${new Date(DATA.generated_at).toLocaleString()}`;
+  $("fresh").style.display = "none";
+}
+async function main() {
+  $("metric").innerHTML = Object.entries(METRICS).map(([k, m]) => `<option value="${k}">${m.name}</option>`).join("");
+  const fromHash = readHash();
+  try { adopt(await fetchIndex()); }
+  catch (e) { $("content").textContent = "加载 index.json 失败：" + e; return; }
+  if (!fromHash) { const [, fn] = presets()[0]; state.cols = fn(); state.ref = state.cols[0] || ""; }
+  for (const b of $("tabs").children) b.onclick = () => { state.view = b.dataset.view; update(); };
+  $("metric").onchange = (e) => { state.metric = e.target.value; update(); };
+  $("ref").onchange = (e) => { state.ref = e.target.value; update(); };
+  $("sort").onchange = (e) => { state.sort = e.target.value; update(); };
+  $("show-target").onchange = (e) => { state.target = e.target.checked; update(); };
+  $("show-proxy").onchange = (e) => { state.proxy = e.target.checked; update(); };
+  $("width").oninput = (e) => { state.width = +e.target.value; document.documentElement.style.setProperty("--cell", state.width + "px"); };
+  $("width").onchange = () => writeHash();
+  let timer = null;
+  $("q").oninput = (e) => { clearTimeout(timer); timer = setTimeout(() => { state.q = e.target.value; update(); }, 300); };
+  $("playall").onclick = () => { const s = visibleSyncs(); const go = s.some((x) => !x.playing); s.forEach((x) => go ? x.play() : x.pause()); };
+  document.addEventListener("keydown", (e) => {
+    if ((e.target.tagName === "INPUT" && e.target.type === "text") || e.target.tagName === "SELECT") return;
+    if (e.key === "Escape" && $("modal").close) $("modal").close();
+    if (e.key === " " && !$("modal").close) { e.preventDefault(); $("playall").click(); }
+  });
+  $("fresh").onclick = async () => { adopt(await fetchIndex()); update(); };
+  const videoCount = (data) => data.tasks.reduce((a, t) => a + Object.keys(t.items).length, 0);
+  setInterval(async () => {
+    try {
+      const next = await fetchIndex();
+      const added = videoCount(next) - videoCount(DATA);
+      if (added > 0) {
+        $("fresh").textContent = `新增 ${added} 个视频 · 点击刷新`;
+        $("fresh").style.display = "inline-block";
+      }
+    } catch (e) { /* keep showing the current data */ }
+  }, 300000);
+  update();
+}
+main();
+</script>
+</body>
+</html>
