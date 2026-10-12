@@ -66,6 +66,21 @@ def test_proxy_training_accepts_weight_only_initialization() -> None:
         validate_h3_config(config)
 
 
+def test_proxy_learning_rate_is_free_but_positive_while_the_warmup_stays_pinned() -> None:
+    config = _proxy_config()
+    config["train"]["optimizer"]["learning_rate"] = 2e-4
+    validate_h3_config(config)
+
+    config["train"]["optimizer"]["learning_rate"] = 0.0
+    with pytest.raises(ConfigurationError, match="learning_rate must be positive"):
+        validate_h3_config(config)
+
+    config["train"]["optimizer"]["learning_rate"] = 1e-4
+    config["train"]["optimizer"]["warmup_steps"] = 50
+    with pytest.raises(ConfigurationError, match="warmup_steps must be 10"):
+        validate_h3_config(config)
+
+
 def test_proxy_inference_example_uses_one_sp8_worker_and_allows_base_baseline() -> None:
     config = yaml.safe_load(INFER_EXAMPLE.read_text(encoding="utf-8"))
     contract = validate_h3_config(config)

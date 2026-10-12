@@ -398,12 +398,18 @@ def _validate_training(
     ):
         _equal(train, key, expected, "train")
     optimizer = _mapping(train, "optimizer")
+    if proxy:
+        if _number(optimizer, "learning_rate", "train.optimizer") <= 0:
+            raise ConfigurationError("train.optimizer.learning_rate must be positive")
+    else:
+        _equal(
+            optimizer,
+            "learning_rate",
+            {"stage0p5": 1e-4, "stage1": 3e-5, "stage2": 2e-6}[stage],
+            "train.optimizer",
+        )
     for key, expected in (
         ("name", "fp32_master_adamw"),
-        (
-            "learning_rate",
-            2e-5 if proxy else {"stage0p5": 1e-4, "stage1": 3e-5, "stage2": 2e-6}[stage],
-        ),
         (
             "warmup_steps",
             10 if proxy else {"stage0p5": 500, "stage1": 1000, "stage2": 0}[stage],
