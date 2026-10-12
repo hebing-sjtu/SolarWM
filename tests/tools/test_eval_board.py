@@ -164,3 +164,10 @@ def test_sync_fetches_media_that_is_missing_or_short_and_leaves_the_index_for_la
         "index.html": 10,
     }
     assert sync.missing(remote, str(tmp_path)) == ["media/new.mp4", "media/short.mp4"]
+    sizes = {"a": 3, "b": 3, "c": 5}
+    assert list(sync.batches(["a", "b", "c"], sizes, limit=6)) == [["a", "b"], ["c"]]
+    index = {
+        "samples": {"s1": {"target": "media/t.mp4", "proxy": {"correct": "media/p.mp4"}}},
+        "tasks": [{"items": {"s1": {"video": "media/g.mp4"}}}],
+    }
+    assert sync.referenced(index) == {"media/t.mp4", "media/p.mp4", "media/g.mp4"}

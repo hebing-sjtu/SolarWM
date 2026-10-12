@@ -2,9 +2,10 @@
 """Mirror an exported eval board from a BCS pod to this host, fetching only what is missing.
 
 Media files are content-addressed and never rewritten, so a name with the same size is already
-here. index.json and index.html change on every export; they are fetched after the media they
-point to, so the page never names a video this host lacks. Pods have no rsync, so files travel
-as a tar stream over `kubectl exec`. Nothing here is ever deleted.
+here. A new index.json replaces the old one only once every video it names is here, so the page
+never points at a missing file. Pods have no rsync, so files travel as tar streams over
+`kubectl exec`; those streams can drop mid-transfer, so batches are kept small and whatever
+arrived whole is kept. Nothing here is ever deleted.
 
 Standard library only and Python 3.6 compatible.
 
@@ -13,6 +14,7 @@ Standard library only and Python 3.6 compatible.
 """
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -21,7 +23,8 @@ import sys
 import time
 
 INDEX = ("index.json", "index.html")
-BATCH = 200
+BATCH_BYTES = 256 << 20
+ATTEMPTS = 4
 
 
 def find_pod(pattern, namespace):
@@ -47,24 +50,25 @@ def find_pod(pattern, namespace):
     return names[-1]
 
 
+def exec_args(pod, args, *command, stdin=False):
+    return [
+        "kubectl",
+        "-n",
+        args.namespace,
+        "exec",
+        *(["-i"] if stdin else []),
+        pod,
+        "-c",
+        args.container,
+        "--",
+        *command,
+    ]
+
+
 def remote_files(pod, args):
     script = f"cd {args.remote} && find . -path './.*' -prune -o -type f -printf '%P\\t%s\\n'"
     out = subprocess.run(
-        [
-            "kubectl",
-            "-n",
-            args.namespace,
-            "exec",
-            pod,
-            "-c",
-            args.container,
-            "--",
-            "sh",
-            "-c",
-            script,
-        ],
-        stdout=subprocess.PIPE,
-        check=True,
+        exec_args(pod, args, "sh", "-c", script), stdout=subprocess.PIPE, check=True
     ).stdout.decode("utf-8")
     files = {}
     for line in out.splitlines():
@@ -85,45 +89,78 @@ def missing(remote, local_root):
     return wanted
 
 
-def fetch(pod, names, args):
-    """Copy names from the pod into the local board; each lands whole or not at all."""
+def batches(names, sizes, limit=BATCH_BYTES):
+    batch, total = [], 0
+    for name in names:
+        if batch and total + sizes[name] > limit:
+            yield batch
+            batch, total = [], 0
+        batch.append(name)
+        total += sizes[name]
+    if batch:
+        yield batch
+
+
+def pull(pod, names, args):
+    """Stream names from the pod into a fresh .incoming directory and return its path."""
     incoming = os.path.join(args.local, ".incoming")
     shutil.rmtree(incoming, ignore_errors=True)
     os.makedirs(incoming)
     sender = subprocess.Popen(
-        [
-            "kubectl",
-            "-n",
-            args.namespace,
-            "exec",
-            "-i",
-            pod,
-            "-c",
-            args.container,
-            "--",
-            "tar",
-            "-C",
-            args.remote,
-            "-cf",
-            "-",
-            "-T",
-            "-",
-        ],
+        exec_args(pod, args, "tar", "-C", args.remote, "-cf", "-", "-T", "-", stdin=True),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
     )
-    receiver = subprocess.Popen(["tar", "-C", incoming, "-xf", "-"], stdin=sender.stdout)
+    receiver = subprocess.Popen(
+        ["tar", "-C", incoming, "-xf", "-"], stdin=sender.stdout, stderr=subprocess.DEVNULL
+    )
     sender.stdout.close()
     sender.stdin.write(("\n".join(names) + "\n").encode("utf-8"))
     sender.stdin.close()
-    if receiver.wait() or sender.wait():
-        raise RuntimeError(f"tar over kubectl exec failed for {len(names)} file(s)")
+    receiver.wait()
+    sender.wait()
+    return incoming
+
+
+def fetch_media(pod, names, sizes, args):
+    """Keep every file that arrived at its full size; the rest wait for the next attempt."""
+    incoming = pull(pod, names, args)
     for name in names:
         source = os.path.join(incoming, name)
-        dest = os.path.join(args.local, name)
-        os.makedirs(os.path.dirname(dest) or args.local, exist_ok=True)
-        os.replace(source, dest)
+        if os.path.isfile(source) and os.path.getsize(source) == sizes[name]:
+            dest = os.path.join(args.local, name)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            os.replace(source, dest)
     shutil.rmtree(incoming, ignore_errors=True)
+
+
+def referenced(index):
+    paths = set()
+    for sample in index.get("samples", {}).values():
+        if sample.get("target"):
+            paths.add(sample["target"])
+        paths.update((sample.get("proxy") or {}).values())
+    for task in index.get("tasks", []):
+        paths.update(item["video"] for item in task["items"].values())
+    return paths
+
+
+def fetch_index(pod, args):
+    """Install the pod's index.json and index.html, unless the index names a missing video."""
+    incoming = pull(pod, list(INDEX), args)
+    try:
+        with open(os.path.join(incoming, "index.json"), encoding="utf-8") as handle:
+            index = json.load(handle)
+        absent = [p for p in referenced(index) if not os.path.isfile(os.path.join(args.local, p))]
+        if absent:
+            return f"kept the previous index: the new one names {len(absent)} video(s) not here yet"
+        for name in INDEX:
+            os.replace(os.path.join(incoming, name), os.path.join(args.local, name))
+        return None
+    except (OSError, ValueError) as exc:
+        return f"kept the previous index: {exc}"
+    finally:
+        shutil.rmtree(incoming, ignore_errors=True)
 
 
 def sync_once(args):
@@ -132,11 +169,22 @@ def sync_once(args):
     if "index.json" not in remote:
         raise RuntimeError(f"{pod}:{args.remote} has no index.json yet")
     wanted = missing(remote, args.local)
-    for start in range(0, len(wanted), BATCH):
-        fetch(pod, wanted[start : start + BATCH], args)
-    fetch(pod, [name for name in INDEX if name in remote], args)
+    total = len(wanted)
+    for _ in range(ATTEMPTS):
+        if not wanted:
+            break
+        for batch in batches(wanted, remote):
+            fetch_media(pod, batch, remote, args)
+        wanted = missing(remote, args.local)
+    problem = fetch_index(pod, args)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[eval-board-sync] {stamp} {pod}: fetched {len(wanted)} file(s)", flush=True)
+    print(
+        f"[eval-board-sync] {stamp} {pod}: fetched {total - len(wanted)}/{total} new file(s)"
+        + (f"; {problem}" if problem else ""),
+        flush=True,
+    )
+    if wanted:
+        raise RuntimeError(f"{len(wanted)} file(s) still missing after {ATTEMPTS} attempts")
 
 
 def main():
