@@ -13,6 +13,7 @@ from .weights import canonical_lora_key
 _PROXY_ROUTES = {
     "stage0p5": ("bidirectional", "flow_matching", "data_ward_velocity"),
     "stage1": ("teacher_forcing", "anyflow_forward_map", "v1_5"),
+    "stage2": ("self_gradient_forcing", "flow_matching", "data_ward_velocity"),
 }
 
 

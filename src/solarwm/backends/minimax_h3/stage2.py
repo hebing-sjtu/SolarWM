@@ -6,8 +6,8 @@ from typing import Any
 
 from .distributed import broadcast_sp_tensor, is_sequence_parallel_enabled
 from .layout import build_stage0p5_layout, patchify_video, unpatchify_video
-from .sgf import h3_sgf_score_timesteps
-from .sgf_rollout import H3SGFInputs, h3_sgf_rollout
+from .sgf import h3_sgf_critic_loss, h3_sgf_score_timesteps
+from .sgf_rollout import H3SGFInputs, h3_sgf_replay, h3_sgf_rollout
 from .stage0p5 import H3Stage0p5Core
 from .torch_flow import sample_shifted_timestep, scale_noise
 from .torch_layout import build_row_timesteps
@@ -15,6 +15,8 @@ from .torch_layout import build_row_timesteps
 
 class H3SGFCore(H3Stage0p5Core):
     """Share the exact fixed-audio input construction between rollout and validation."""
+
+    rollout_chunks = 10
 
     def random_like(self, value: Any, *, generator: Any = None) -> Any:
         import torch
@@ -90,7 +92,22 @@ class H3SGFCore(H3Stage0p5Core):
             progress=progress,
         )
 
-    def score_inputs(self, clean: Any) -> tuple[Any, ...]:
+    def replay(self, inputs: H3SGFInputs, rollout: Any) -> Any:
+        return h3_sgf_replay(student=self.model, inputs=inputs, rollout=rollout)
+
+    @staticmethod
+    def supervised(video: Any) -> Any:
+        return video[:, :, :47]
+
+    @staticmethod
+    def kl_mask(inputs: H3SGFInputs) -> None:
+        return None
+
+    @staticmethod
+    def critic_loss(velocity: Any, *, noise: Any, clean: Any, inputs: H3SGFInputs) -> Any:
+        return h3_sgf_critic_loss(velocity, noise=noise, clean=clean)
+
+    def score_inputs(self, clean: Any, inputs: H3SGFInputs | None = None) -> tuple[Any, ...]:
         video_time, audio_time = h3_sgf_score_timesteps(device=self.device)
         self._broadcast_logical_sample(video_time, audio_time)
         noise = self.random_like(clean)

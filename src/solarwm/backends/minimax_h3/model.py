@@ -406,6 +406,7 @@ class SolarMiniMaxH3Transformer3DModel(H3AnyFlowConditioningMixin, MiniMaxH3Tran
     def _sgf_attention_forward(attn, query, key, value, control):
         from .sgf_attention import sgf_attention as attend_sgf
 
+        native = getattr(control, "native_rotary", False)
         sp_enabled = is_sequence_parallel_enabled()
         if sp_enabled:
             if attn.heads % get_sp_size():
@@ -423,15 +424,20 @@ class SolarMiniMaxH3Transformer3DModel(H3AnyFlowConditioningMixin, MiniMaxH3Tran
                 q.contiguous(), k.contiguous(), v.contiguous(), dropout_p=0.0, causal=False
             )
 
-        attended = attend_sgf(
-            query,
-            key,
-            value,
-            control=control,
-            layer=attn.h3_layer_index,
-            apply_rotary=_apply_rotary_emb,
-            attend=segment_attention,
-        )
+        if native:
+            attended = control.attend(
+                query, key, value, layer=attn.h3_layer_index, attend=segment_attention
+            )
+        else:
+            attended = attend_sgf(
+                query,
+                key,
+                value,
+                control=control,
+                layer=attn.h3_layer_index,
+                apply_rotary=_apply_rotary_emb,
+                attend=segment_attention,
+            )
         if sp_enabled:
             attended = sequence_model_parallel_all_to_all_4D(attended, scatter_dim=1, gather_dim=2)
         attended = attended.flatten(2, 3).type_as(query)
@@ -466,6 +472,10 @@ class SolarMiniMaxH3Transformer3DModel(H3AnyFlowConditioningMixin, MiniMaxH3Tran
         key = attn.norm_k(key)
 
         if sgf_attention is not None:
+            if getattr(sgf_attention, "native_rotary", False):
+                # Absolute positions: rotate this shard's rows before Ulysses, as below.
+                query = _apply_rotary_emb(query, *rotary_emb)
+                key = _apply_rotary_emb(key, *rotary_emb)
             return cls._sgf_attention_forward(attn, query, key, value, sgf_attention)
 
         # H3 native MM-RoPE first, then token-selective camera PRoPE.
@@ -625,7 +635,10 @@ class SolarMiniMaxH3Transformer3DModel(H3AnyFlowConditioningMixin, MiniMaxH3Tran
             )
         if sp_enabled:
             validate_packed_attention_mask(attention_mask, total_tokens=sequence_length)
-        if sgf_attention is not None:
+        if sgf_attention is not None and getattr(sgf_attention, "native_rotary", False):
+            if attention_mask is not None or fused_prope or cam_viewmats is not None:
+                raise ValueError("H3 Ref2VA SGF attention takes no mask and no camera PRoPE")
+        elif sgf_attention is not None:
             if attention_mask is not None or fused_prope is not True:
                 raise ValueError("H3 SGF requires its own segmented attention and fused PRoPE")
             from .sgf_attention import prepare_sgf_rotaries
@@ -685,6 +698,7 @@ class SolarMiniMaxH3Transformer3DModel(H3AnyFlowConditioningMixin, MiniMaxH3Tran
         rotary_emb = self.rope(position_ids)
         needs_control = (
             lora_route is not None
+            or sgf_attention is not None
             or _is_flex_block_mask(attention_mask)
             or fused_prope is not None
             or cam_viewmats is not None

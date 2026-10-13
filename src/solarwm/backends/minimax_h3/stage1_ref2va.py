@@ -72,17 +72,22 @@ def ref2va_row_time_pairs(
 class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
     """Train and roll out the Ref2VA partition causally, five latents per chunk."""
 
+    windowed_clean = False
+
     def __init__(self, model: Any, device: Any, config: Any) -> None:
         super().__init__(model, device, config)
         self.train = config["train"]
         self.train_frames = int(config["data"]["train_target_latents"])
+        self.rollout_chunks = -(-self.target_frames // CHUNK_LATENTS)
+        self._windows: OrderedDict[tuple[Any, ...], tuple[Any, Any]] = OrderedDict()
+        self._check_train_frames()
+
+    def _check_train_frames(self) -> None:
         if self.train_frames % CHUNK_LATENTS or self.train_frames > self.target_frames:
             raise ValueError(
                 f"Ref2VA Stage1 trains whole {CHUNK_LATENTS}-latent chunks of the cached "
                 f"{self.target_frames} latents, got train_target_latents={self.train_frames}"
             )
-        self.rollout_chunks = -(-self.target_frames // CHUNK_LATENTS)
-        self._windows: OrderedDict[tuple[Any, ...], tuple[Any, Any]] = OrderedDict()
 
     def window(
         self, tags: Any, anchor: Any, proxy: Any, *, frames: int, chunks: tuple[int, int]
@@ -118,7 +123,12 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
             window_chunks=WINDOW_CHUNKS,
             chunks=chunks,
         ).to(self.device)
-        cached = (layout, build_ref2va_stage1_block_mask(layout, device=self.device))
+        cached = (
+            layout,
+            build_ref2va_stage1_block_mask(
+                layout, device=self.device, windowed_clean=self.windowed_clean
+            ),
+        )
         self._windows[key] = cached
         while len(self._windows) > 2 * WINDOW_CHUNKS:
             self._windows.popitem(last=False)

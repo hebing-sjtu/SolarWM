@@ -197,9 +197,10 @@ def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0
             f"got {input_mode!r}"
         )
     if input_mode == "proxy_preencoded":
-        if action not in {"train", "infer"} or stage not in {"stage0p5", "stage1"}:
+        if action not in {"train", "infer"} or stage not in {"stage0p5", "stage1", "stage2"}:
             raise ConfigurationError(
-                "H3 proxy_preencoded data only supports Stage0.5 or Stage1 training or inference"
+                "H3 proxy_preencoded data only supports Stage0.5, Stage1 or Stage2 training "
+                "or inference"
             )
         for key, expected in (
             ("dataset_name", H3_PROXY_DATASET_NAME),
@@ -335,7 +336,7 @@ def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0
     return input_mode
 
 
-def _validate_route(train: Mapping[str, Any]) -> None:
+def _validate_route(train: Mapping[str, Any], *, proxy: bool = False) -> None:
     from solarwm.config.routes import Route, supported_routes
 
     route = Route(
@@ -365,8 +366,11 @@ def _validate_route(train: Mapping[str, Any]) -> None:
             ("last_step_only", False),
             ("match_context", True),
             ("cache_mode", "exit"),
-            ("tail_camera_policy", "repeat_last_latent"),
-            ("audio_condition_policy", "fixed_noised_silence_per_rollout"),
+            ("tail_camera_policy", "none" if proxy else "repeat_last_latent"),
+            (
+                "audio_condition_policy",
+                "fixed_noised_audio_per_rollout" if proxy else "fixed_noised_silence_per_rollout",
+            ),
             ("score_min_sigma", 0.02),
             ("score_max_sigma", 0.98),
         ):
@@ -406,11 +410,13 @@ def _validate_training(
         ("name", "fp32_master_adamw"),
         (
             "warmup_steps",
-            10 if proxy else {"stage0p5": 500, "stage1": 1000, "stage2": 0}[stage],
+            {"stage0p5": 10, "stage1": 10, "stage2": 0}[stage]
+            if proxy
+            else {"stage0p5": 500, "stage1": 1000, "stage2": 0}[stage],
         ),
     ):
         _equal(optimizer, key, expected, "train.optimizer")
-    if proxy:
+    if proxy and not sgf:
         for key, expected in (
             ("betas", [0.9, 0.999]),
             ("epsilon", 1e-8),
@@ -431,6 +437,12 @@ def _validate_training(
     if sgf:
         critic = _mapping(train, "critic_optimizer")
         for key, value in optimizer.items():
+            if key == "learning_rate" and proxy:
+                if _number(critic, key, "train.critic_optimizer") <= 0:
+                    raise ConfigurationError(
+                        "train.critic_optimizer.learning_rate must be positive"
+                    )
+                continue
             _equal(critic, key, 4e-7 if key == "learning_rate" else value, "train.critic_optimizer")
     fsdp = _mapping(train, "fsdp")
     for key, expected in (
@@ -500,7 +512,7 @@ def _validate_validation(
                 ("pixel_frames", 124),
                 ("latent_frames", 37),
                 ("fps", 24),
-                ("num_inference_steps", 4 if stage == "stage1" else 30),
+                ("num_inference_steps", 30 if stage == "stage0p5" else 4),
                 ("passes", ["ema"]),
             ):
                 _equal(validation, key, expected, "validation")
@@ -680,7 +692,7 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
 
     if action != "preencode":
         train = _mapping(config, "train")
-        _validate_route(train)
+        _validate_route(train, proxy=input_mode == "proxy_preencoded")
         if stage in {"stage1", "stage2"} and input_mode != "proxy_preencoded":
             validation = _mapping(config, "validation")
             if validation.get("prepared_plan") is not None:
@@ -724,28 +736,26 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
                         "checkpoint.resume_from must be null or a non-empty path"
                     )
                 initialization_value = checkpoint.get("initialization")
+                if stage == "stage2" and initialization_value is None:
+                    raise ConfigurationError(
+                        "H3 proxy Stage2 needs student, teacher and critic initialization"
+                    )
                 if initialization_value is not None:
                     initialization = _mapping(checkpoint, "initialization")
-                    student = _mapping(initialization, "student")
-                    path = _nonempty_path(
-                        student,
-                        "path",
-                        "checkpoint.initialization.student",
-                    )
-                    if not path.startswith("/"):
-                        raise ConfigurationError(
-                            "checkpoint.initialization.student.path must be absolute"
+                    roles = ("student", "teacher", "critic") if stage == "stage2" else ("student",)
+                    for role in roles:
+                        item = _mapping(initialization, role)
+                        where = f"checkpoint.initialization.{role}"
+                        if not _nonempty_path(item, "path", where).startswith("/"):
+                            raise ConfigurationError(f"{where}.path must be absolute")
+                        if item.get("weight_source") not in {"live", "ema"}:
+                            raise ConfigurationError(f"{where}.weight_source must be live or ema")
+                        _equal(
+                            item,
+                            "stage",
+                            "stage1" if stage == "stage2" and role == "student" else "stage0p5",
+                            where,
                         )
-                    if student.get("weight_source") not in {"live", "ema"}:
-                        raise ConfigurationError(
-                            "checkpoint.initialization.student.weight_source must be live or ema"
-                        )
-                    _equal(
-                        student,
-                        "stage",
-                        "stage0p5",
-                        "checkpoint.initialization.student",
-                    )
                 maximum = int(train["max_steps"])
                 save_every = int(checkpoint.get("save_every_steps", 0))
                 save_steps = {int(step) for step in checkpoint.get("save_steps", ())}

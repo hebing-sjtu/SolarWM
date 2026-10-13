@@ -49,11 +49,13 @@ def stage1_window_allows(
     key_chunk: int,
     *,
     window_chunks: int = 6,
+    windowed_clean: bool = False,
 ) -> bool:
     """Return the Stage1 six-chunk visibility decision.
 
     Ref2VA proxy rows are read by proxy, clean and noisy rows of the same or one of the next
-    ``window_chunks - 1`` chunks, never by text, anchor or audio.
+    ``window_chunks - 1`` chunks, never by text, anchor or audio. ``windowed_clean`` limits clean
+    history to the same window, as a rollout that keeps only the recent chunks' keys sees it.
     """
 
     if window_chunks <= 0:
@@ -69,7 +71,12 @@ def stage1_window_allows(
     if query_role == CLEAN_VIDEO_ROLE:
         if key_role in (CONDITION_ROLE, AUDIO_ROLE):
             return True
-        return key_role == CLEAN_VIDEO_ROLE and query_chunk - key_chunk >= 0
+        delta = query_chunk - key_chunk
+        return (
+            key_role == CLEAN_VIDEO_ROLE
+            and delta >= 0
+            and not (windowed_clean and delta >= window_chunks)
+        )
     if query_role == NOISY_VIDEO_ROLE:
         if key_role in (CONDITION_ROLE, AUDIO_ROLE):
             return True
@@ -80,7 +87,7 @@ def stage1_window_allows(
     return False
 
 
-def build_stage1_window_mask(layout: H3PackedLayout) -> np.ndarray:
+def build_stage1_window_mask(layout: H3PackedLayout, *, windowed_clean: bool = False) -> np.ndarray:
     """Materialize a dense boolean six-chunk mask."""
 
     if layout.stage != "stage1" or layout.window_chunks is None:
@@ -104,11 +111,12 @@ def build_stage1_window_mask(layout: H3PackedLayout) -> np.ndarray:
     common_k = condition_k | audio_k
     window = int(layout.window_chunks)
     recent_proxy_k = proxy_k & (delta >= 0) & (delta < window)
+    clean_history_k = clean_k & (delta >= 0) & ((delta < window) | (not windowed_clean))
     return (
         (condition_q & condition_k)
         | (audio_q & common_k)
         | (proxy_q & (condition_k | recent_proxy_k))
-        | (clean_q & (common_k | (clean_k & (delta >= 0)) | recent_proxy_k))
+        | (clean_q & (common_k | clean_history_k | recent_proxy_k))
         | (
             noisy_q
             & (

@@ -12,8 +12,6 @@ from solarwm.training.sgf import compute_sgf_kl_gradient, sgf_student_loss, shou
 
 from .distributed import get_sp_size, sync_lora_gradients
 from .runtime import H3TrainingRuntime, _base_model_load_receipt
-from .sgf import h3_sgf_critic_loss
-from .sgf_rollout import h3_sgf_replay
 from .stage2 import H3SGFCore
 from .torch_flow import predict_clean_sample
 
@@ -62,7 +60,11 @@ class H3SGFTrainingRuntime(H3TrainingRuntime):
             self.load_checkpoint(resume)
         self._check_ema_boundary()
 
-    def _make_core(self) -> H3SGFCore:
+    def _make_core(self) -> Any:
+        if self.proxy_mode:
+            from .stage2_ref2va import H3Ref2VASGFCore
+
+            return H3Ref2VASGFCore(self.model, self.device, self.config)
         return H3SGFCore(self.model, self.silence, self.device)
 
     def _build_score_role(self, *, trainable: bool) -> tuple[Any, Any]:
@@ -91,7 +93,20 @@ class H3SGFTrainingRuntime(H3TrainingRuntime):
             frozen_base_shard_size=8,
         )
         role = "critic" if trainable else "teacher"
-        identity = load_initial_weights(self.checkpoint_cfg["initialization"][role], lora)
+        initialization = self.checkpoint_cfg["initialization"][role]
+        if self.proxy_mode:
+            from .proxy_weights import load_proxy_checkpoint
+
+            identity = load_proxy_checkpoint(
+                str(initialization["path"]),
+                lora,
+                weight_source=str(initialization["weight_source"]),
+                torch=self.torch,
+                stage=str(initialization["stage"]),
+                model_stage="stage0p5",
+            )
+        else:
+            identity = load_initial_weights(initialization, lora)
         self.initialization[role] = identity
         if self.is_main:
             print(f"[h3-sgf-init] {role}={identity}", flush=True)
@@ -167,7 +182,8 @@ class H3SGFTrainingRuntime(H3TrainingRuntime):
 
     def _rollout(self, inputs: Any) -> Any:
         return self.core.rollout(
-            inputs, progress=lambda chunk: self._phase(f"rollout_chunk={chunk}/10")
+            inputs,
+            progress=lambda chunk: self._phase(f"rollout_chunk={chunk}/{self.core.rollout_chunks}"),
         )
 
     def train_outer_step(self) -> dict[str, float]:
@@ -186,10 +202,11 @@ class H3SGFTrainingRuntime(H3TrainingRuntime):
             inputs = core.prepare_inputs(self._next_batch())
             rollout = self._rollout(inputs)
             self._phase("student_replay")
-            output = h3_sgf_replay(student=self.model, inputs=inputs, rollout=rollout)[:, :, :47]
+            output = core.supervised(core.replay(inputs, rollout))
+            mask = core.kl_mask(inputs)
             with torch.no_grad():
                 self._phase("student_scores")
-                noisy, noise, vt, audio, at = core.score_inputs(output.detach())
+                noisy, noise, vt, audio, at = core.score_inputs(output.detach(), inputs)
                 fake_velocity = core.score_forward(critic["model"], inputs, noisy, vt, audio, at)
                 real_velocity = core.score_forward(self.teacher, inputs, noisy, vt, audio, at)
                 fake = predict_clean_sample(noisy, fake_velocity, vt)
@@ -197,9 +214,9 @@ class H3SGFTrainingRuntime(H3TrainingRuntime):
                 if not bool(torch.isfinite(fake).all() and torch.isfinite(real).all()):
                     raise FloatingPointError("non-finite H3 SGF score output")
                 gradient = compute_sgf_kl_gradient(
-                    fake_x0=fake, real_x0=real, student_output=output.detach()
+                    fake_x0=fake, real_x0=real, student_output=output.detach(), mask=mask
                 )
-            loss = sgf_student_loss(output, gradient)
+            loss = sgf_student_loss(output, gradient, mask=mask)
             self._phase("student_backward")
             (loss / get_sp_size()).backward()
             stats["loss_student"] = float(loss.detach())
@@ -227,11 +244,11 @@ class H3SGFTrainingRuntime(H3TrainingRuntime):
         rollout = self._rollout(inputs)
         self._phase("critic_replay")
         with torch.no_grad():
-            clean = h3_sgf_replay(student=self.model, inputs=inputs, rollout=rollout)[:, :, :47]
-            noisy, noise, vt, audio, at = core.score_inputs(clean)
+            clean = core.supervised(core.replay(inputs, rollout))
+            noisy, noise, vt, audio, at = core.score_inputs(clean, inputs)
         self._phase("critic_forward")
         velocity = core.score_forward(critic["model"], inputs, noisy, vt, audio, at)
-        loss = h3_sgf_critic_loss(velocity, noise=noise, clean=clean)
+        loss = core.critic_loss(velocity, noise=noise, clean=clean, inputs=inputs)
         if not bool(torch.isfinite(loss)):
             raise FloatingPointError("non-finite H3 SGF critic loss")
         self._phase("critic_backward")

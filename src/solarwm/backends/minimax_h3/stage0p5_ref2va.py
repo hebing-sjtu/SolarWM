@@ -136,9 +136,11 @@ class H3Ref2VAStage0p5Core:
         video_t: Any,
         audio_t: Any,
         fixed_rows: int,
+        model: Any = None,
     ) -> Any:
         import torch
 
+        model = self.model if model is None else model
         times, inverse = build_row_timesteps(
             layout.source,
             float(video_t.item()),
@@ -146,7 +148,7 @@ class H3Ref2VAStage0p5Core:
             condition_video_timestep=max(float(video_t.item()), 0.999),
             num_fixed_video_rows=int(fixed_rows),
         )
-        video, _audio = self.model(
+        video, _audio = model(
             hidden_states=video_rows,
             audio_hidden_states=audio_rows,
             encoder_hidden_states=prompt,

@@ -72,7 +72,13 @@ def _role_chunk_runs(layout: H3PackedLayout) -> tuple[list[Run], Any]:
 
 
 def _sparse_tile_metadata(
-    runs: list[Run], *, sequence_length: int, window: int, tile_size: int, device: Any
+    runs: list[Run],
+    *,
+    sequence_length: int,
+    window: int,
+    tile_size: int,
+    device: Any,
+    windowed_clean: bool = False,
 ) -> tuple[Any, Any, Any, Any]:
     """Full and partial ``[Q/128, K/128]`` tiles of the W6 visibility, as ordered metadata."""
 
@@ -102,6 +108,7 @@ def _sparse_tile_metadata(
                     key_role,
                     key_chunk,
                     window_chunks=window,
+                    windowed_clean=windowed_clean,
                 )
             ]
         )
@@ -324,11 +331,13 @@ def build_ref2va_stage1_block_mask(
     *,
     device: Any = None,
     block_size: int | tuple[int, int] = 128,
+    windowed_clean: bool = False,
 ) -> Any:
     """The W6 ``BlockMask`` of a ``[text+anchor | proxy | audio | clean | noisy]`` document.
 
     Proxy rows are one contiguous run per reference, split into the target's chunks; the last
-    may be shorter. See :func:`stage1_window_allows` for who reads them.
+    may be shorter. See :func:`stage1_window_allows` for who reads them, and for
+    ``windowed_clean``.
     """
 
     _validate_layout(layout)
@@ -339,7 +348,12 @@ def build_ref2va_stage1_block_mask(
     sequence_length = int(layout.sequence_length)
     window = int(layout.window_chunks)
     metadata = _sparse_tile_metadata(
-        runs, sequence_length=sequence_length, window=window, tile_size=tile_size, device=device
+        runs,
+        sequence_length=sequence_length,
+        window=window,
+        tile_size=tile_size,
+        device=device,
+        windowed_clean=windowed_clean,
     )
 
     proxy_runs = [run for run in runs if run[2] == PROXY_VIDEO_ROLE]
@@ -430,11 +444,14 @@ def build_ref2va_stage1_block_mask(
         delta = query_chunk - key_chunk
         common_key = condition_key | audio_key
         recent_proxy = proxy_key & (delta >= 0) & (delta < window_bound)
+        clean_history = clean_key & (delta >= 0)
+        if windowed_clean:
+            clean_history = clean_history & (delta < window_bound)
         return (
             (condition_query & condition_key)
             | (audio_query & common_key)
             | (proxy_query & (condition_key | recent_proxy))
-            | (clean_query & (common_key | (clean_key & (delta >= 0)) | recent_proxy))
+            | (clean_query & (common_key | clean_history | recent_proxy))
             | (
                 noisy_query
                 & (

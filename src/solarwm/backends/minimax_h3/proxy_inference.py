@@ -137,7 +137,17 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
         if ablation_mode == "shuffled"
         else None
     )
-    if stage == "stage1":
+    if stage == "stage2":
+        from .stage2_ref2va import H3Ref2VASGFCore
+
+        core = H3Ref2VASGFCore(model, device, config)
+        generation = {
+            "train_latent_frames": core.train_frames,
+            "rollout_latent_frames": core.rollout_frames,
+            "generation_mode": "causal-w6-kv-ref2va-proxy",
+            "sample_solver": "sgf-x0-renoise-nfe4-per-chunk",
+        }
+    elif stage == "stage1":
         core = H3Ref2VAStage1Core(model, device, config)
         generation = {
             "train_latent_frames": core.train_frames,

@@ -280,7 +280,9 @@ def _checkpoint_contract(
             if proxy
             else (45 if stage == "stage1" else 47),
             "rollout_latents": 40 if proxy else 50,
-            "student_rope_mode": "sliding_local" if stage == "stage2" else "native_absolute",
+            "student_rope_mode": "sliding_local"
+            if stage == "stage2" and not proxy
+            else "native_absolute",
             "training_profile": {
                 key: value
                 for key, value in train.items()
@@ -563,6 +565,7 @@ class H3TrainingRuntime:
                     self.lora,
                     weight_source=str(student["weight_source"]),
                     torch=torch,
+                    stage=str(student["stage"]),
                     model_stage=self.stage,
                 ),
                 dist=dist,
