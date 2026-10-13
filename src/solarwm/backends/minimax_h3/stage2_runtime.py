@@ -267,6 +267,7 @@ class H3SGFTrainingRuntime(H3TrainingRuntime):
             lr=float(self.optimizer.param_groups[0]["lr"]),
             critic_lr=float(critic["optimizer"].param_groups[0]["lr"]),
             compute_time_s=time.monotonic() - self._step_started,
+            peak_allocated_gib=torch.cuda.max_memory_allocated(self.device) / (1024**3),
         )
         if self.is_main:
             print(
@@ -295,12 +296,35 @@ def run_sgf_training(config: Any) -> int:
         if runtime.is_main
         else None
     )
+    tracking = config["runtime"].get("tracking") or {}
+    wandb_writer = None
+    if runtime.is_main and bool(tracking.get("enabled", False)):
+        from solarwm.training.wandb_sink import WandbEventSink
+
+        wandb_writer = WandbEventSink(
+            tracking, output_dir=str(config["runtime"]["output_dir"]), resolved_config=config
+        )
     try:
         while runtime.global_step < policy.max_steps:
             stats = runtime.train_outer_step()
             step = runtime.global_step
             if sink is not None:
                 sink({"event": "train_step", "step": step, **stats})
+            if wandb_writer is not None:
+                losses = {"sgf_critic": stats["loss_critic"]}
+                if stats["student_updated"]:
+                    losses["sgf_student"] = stats["loss_student"]
+                wandb_writer(
+                    {
+                        "event": "optimizer_step",
+                        "step": step,
+                        "losses": losses,
+                        "lr": stats["lr"],
+                        "gradient_norm": stats["critic_grad_norm"],
+                        "compute_time_s": stats["compute_time_s"],
+                        "peak_allocated_gib": stats["peak_allocated_gib"],
+                    }
+                )
             if policy.should_save(step):
                 runtime.save_checkpoint(step)
             if policy.should_validate(step):
@@ -309,4 +333,6 @@ def run_sgf_training(config: Any) -> int:
                     sink({"event": "validation", "step": step, "report": report})
     finally:
         runtime.reader.close()
+        if wandb_writer is not None:
+            wandb_writer.finish()
     return 0
