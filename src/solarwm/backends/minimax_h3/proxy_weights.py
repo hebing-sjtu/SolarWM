@@ -23,8 +23,13 @@ def load_proxy_checkpoint(
     weight_source: str,
     torch: Any,
     stage: str = "stage0p5",
+    model_stage: str | None = None,
 ) -> str:
-    """Load only proxy LoRA weights of a ``stage`` checkpoint for inference or warm-start."""
+    """Load only proxy LoRA weights of a ``stage`` checkpoint for inference or warm-start.
+
+    A ``model_stage`` other than ``stage`` (a Stage0.5 LoRA starting Stage1) skips the base
+    parameter inventory, which Stage1's frozen AnyFlow delta embedding enlarges.
+    """
 
     source = str(weight_source).strip().lower()
     if source not in {"live", "ema"}:
@@ -51,7 +56,20 @@ def load_proxy_checkpoint(
             mmap=True,
             weights_only=True,
         )
-        if payload.get("metadata") != lora.metadata():
+        saved, expected_metadata = payload.get("metadata"), lora.metadata()
+        if model_stage not in (None, stage) and isinstance(saved, dict):
+            saved, expected_metadata = (
+                {
+                    **value,
+                    "base_identity": {
+                        key: item
+                        for key, item in value.get("base_identity", {}).items()
+                        if key != "parameter_inventory"
+                    },
+                }
+                for value in (saved, expected_metadata)
+            )
+        if saved != expected_metadata:
             raise BackendContractError("H3 proxy LoRA metadata differs")
         values = payload.get("state")
     else:

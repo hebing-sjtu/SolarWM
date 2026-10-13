@@ -228,6 +228,73 @@ def test_stage1_eval_config_requires_a_stage1_infer_base(tmp_path: Path) -> None
         eval_config(_config(MIXED_INFER), trained, **common)
 
 
+def _proxy_checkpoint(path: Path, *, stage: str, metadata: dict, value: float) -> str:
+    from solarwm.checkpoint import CheckpointContract, CheckpointTransaction
+
+    route = {
+        "stage0p5": ("bidirectional", "flow_matching", "data_ward_velocity"),
+        "stage1": ("teacher_forcing", "anyflow_forward_map", "v1_5"),
+    }[stage]
+    key = "base_model.model.block.attn.to_q.lora_B.weight"
+    with CheckpointTransaction(path) as transaction:
+        torch.save(
+            {"metadata": metadata, "state": {key: torch.full((2, 2), value, dtype=torch.bfloat16)}},
+            transaction.path / "adapter.pt",
+        )
+        transaction.commit(
+            step=300,
+            contract=CheckpointContract(
+                family="minimax_h3",
+                stage=stage,
+                causal_mode=route[0],
+                objective=route[1],
+                objective_variant=route[2],
+                camera_translation_transform="none",
+                parameterization="peft-lora-r128-alpha128",
+                sp_size=1,
+                data_generation="h3.ref2va-proxy.124f.v1",
+            ),
+            required_components=("adapter.pt",),
+            metadata={},
+        )
+    return key
+
+
+def test_stage0p5_proxy_lora_starts_a_stage1_model_with_a_larger_base(tmp_path: Path) -> None:
+    from solarwm.backends.minimax_h3.proxy_weights import load_proxy_checkpoint
+    from solarwm.errors import BackendContractError
+
+    def metadata(parameters: int) -> dict:
+        return {
+            "rank": 128,
+            "base_identity": {"profile": "h3", "parameter_inventory": {"parameters": parameters}},
+        }
+
+    key = _proxy_checkpoint(tmp_path / "bd", stage="stage0p5", metadata=metadata(10), value=2.5)
+    parameter = torch.nn.Parameter(torch.zeros(2, 2, dtype=torch.bfloat16))
+
+    class FakeLoRA:
+        def __init__(self, described: dict) -> None:
+            self.parameter_by_key = {key: parameter}
+            self.described = described
+
+        def metadata(self) -> dict:
+            return self.described
+
+    stage1_lora = FakeLoRA(metadata(12))
+    common = dict(weight_source="live", torch=torch)
+    with pytest.raises(BackendContractError, match="metadata differs"):
+        load_proxy_checkpoint(str(tmp_path / "bd"), stage1_lora, **common)
+    load_proxy_checkpoint(str(tmp_path / "bd"), stage1_lora, model_stage="stage1", **common)
+    assert torch.equal(parameter, torch.full((2, 2), 2.5, dtype=torch.bfloat16))
+    other_rank = FakeLoRA({**metadata(12), "rank": 64})
+    with pytest.raises(BackendContractError, match="metadata differs"):
+        load_proxy_checkpoint(str(tmp_path / "bd"), other_rank, model_stage="stage1", **common)
+    _proxy_checkpoint(tmp_path / "ar", stage="stage1", metadata=metadata(12), value=1.0)
+    with pytest.raises(BackendContractError, match="stage0p5 LoRA"):
+        load_proxy_checkpoint(str(tmp_path / "ar"), stage1_lora, **common)
+
+
 def test_loss_summary_reads_the_anyflow_objective() -> None:
     events = [
         {"event": "optimizer_step", "step": step, "losses": {"anyflow_forward_map": 1.0}}

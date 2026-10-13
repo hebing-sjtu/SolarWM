@@ -563,6 +563,7 @@ class H3TrainingRuntime:
                     self.lora,
                     weight_source=str(student["weight_source"]),
                     torch=torch,
+                    model_stage=self.stage,
                 ),
                 dist=dist,
                 topology=self.topology,
