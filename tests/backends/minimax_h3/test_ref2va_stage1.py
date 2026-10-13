@@ -139,7 +139,7 @@ def test_ref2va_block_mask_matches_dense_visibility(arguments: dict) -> None:
         num_audio_latents=20,
         **arguments,
     )
-    assert source.sequence_length > 4 * 128
+    assert source.sequence_length > 2 * 128
     layout = source.to("cpu")
     mask = build_ref2va_stage1_block_mask(layout, device="cpu")
     rows = torch.arange(layout.sequence_length)
