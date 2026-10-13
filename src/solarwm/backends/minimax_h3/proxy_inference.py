@@ -22,6 +22,7 @@ from .proxy_ablation import apply_proxy_ablation
 from .proxy_artifacts import H3ProxyPtStream
 from .proxy_weights import load_proxy_checkpoint
 from .stage0p5_ref2va import H3Ref2VAStage0p5Core
+from .stage1_ref2va import H3Ref2VAStage1Core
 
 
 def _next_distinct_donor(
@@ -75,7 +76,15 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
     identity = rng_identity("minimax_h3", int(config["data"].get("seed", 42)), topology)
     seed_process(identity.model_init_seed)
 
+    stage = str(config["train"]["stage"])
     modules = load_transformer(config["model"], device=device)
+    if stage == "stage1":
+        modules.transformer.enable_anyflow(float(config["train"]["anyflow_gate"]))
+        modules.fp32_fsdp_units = (
+            *modules.fp32_fsdp_units,
+            modules.transformer.delta_embedding.linear_1,
+            modules.transformer.delta_embedding.linear_2,
+        )
     modules.transformer.eval().requires_grad_(False)
     base_model = _base_model_load_receipt(config["model"], modules.transformer)
     model, lora = inject_h3_lora(
@@ -102,6 +111,7 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                 lora,
                 weight_source=weight_source,
                 torch=torch,
+                stage=stage,
             ),
             dist=dist,
             topology=topology,
@@ -127,7 +137,22 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
         if ablation_mode == "shuffled"
         else None
     )
-    core = H3Ref2VAStage0p5Core(model, device, config)
+    if stage == "stage1":
+        core = H3Ref2VAStage1Core(model, device, config)
+        generation = {
+            "train_latent_frames": core.train_frames,
+            "rollout_latent_frames": core.rollout_chunks * 5,
+            "generation_mode": "causal-w6-ref2va-proxy",
+            "sample_solver": "anyflow-nfe4-per-chunk",
+        }
+    else:
+        core = H3Ref2VAStage0p5Core(model, device, config)
+        generation = {
+            "train_latent_frames": 37,
+            "rollout_latent_frames": 37,
+            "generation_mode": "bidirectional-ref2va-proxy",
+            "sample_solver": "shifted-euler-data-ward",
+        }
     output_root = Path(str(config["runtime"]["output_dir"])).resolve() / "proxy-inference"
     noise_seed = int(config["validation"]["noise_seed"])
     inference_steps = int(config["validation"]["num_inference_steps"])
@@ -214,10 +239,7 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                     "plan_fingerprint": batch.plan_fingerprint,
                     "source_pixel_frames": 124,
                     "output_pixel_frames": 124,
-                    "train_latent_frames": 37,
-                    "rollout_latent_frames": 37,
-                    "generation_mode": "bidirectional-ref2va-proxy",
-                    "sample_solver": "shifted-euler-data-ward",
+                    **generation,
                     "weights_source": weight_source,
                     "proxy_ablation": ablation_mode,
                     "proxy_donor_sample_id": donor_sample_id,
@@ -256,9 +278,7 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
                         reference_latents=batch.target_latents,
                         proxy_references=batch.proxy_references,
                     )
-                    panel_caption = " | ".join(
-                        f"proxy_{name}" for name in batch.proxy_references
-                    )
+                    panel_caption = " | ".join(f"proxy_{name}" for name in batch.proxy_references)
 
                     class CachedAdapter:
                         family = "minimax_h3"

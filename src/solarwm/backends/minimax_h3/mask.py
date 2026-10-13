@@ -11,6 +11,7 @@ from .layout import (
     CLEAN_VIDEO_ROLE,
     CONDITION_ROLE,
     NOISY_VIDEO_ROLE,
+    PROXY_VIDEO_ROLE,
     H3PackedLayout,
 )
 
@@ -49,7 +50,11 @@ def stage1_window_allows(
     *,
     window_chunks: int = 6,
 ) -> bool:
-    """Return the Stage1 six-chunk visibility decision."""
+    """Return the Stage1 six-chunk visibility decision.
+
+    Ref2VA proxy rows are read by proxy, clean and noisy rows of the same or one of the next
+    ``window_chunks - 1`` chunks, never by text, anchor or audio.
+    """
 
     if window_chunks <= 0:
         raise ValueError(f"window_chunks must be positive, got {window_chunks}")
@@ -57,6 +62,10 @@ def stage1_window_allows(
         return key_role == CONDITION_ROLE
     if query_role == AUDIO_ROLE:
         return key_role in (CONDITION_ROLE, AUDIO_ROLE)
+    if key_role == PROXY_VIDEO_ROLE:
+        return 0 <= query_chunk - key_chunk < window_chunks
+    if query_role == PROXY_VIDEO_ROLE:
+        return key_role == CONDITION_ROLE
     if query_role == CLEAN_VIDEO_ROLE:
         if key_role in (CONDITION_ROLE, AUDIO_ROLE):
             return True
@@ -90,17 +99,23 @@ def build_stage1_window_mask(layout: H3PackedLayout) -> np.ndarray:
     clean_k = k_role == CLEAN_VIDEO_ROLE
     noisy_q = q_role == NOISY_VIDEO_ROLE
     noisy_k = k_role == NOISY_VIDEO_ROLE
+    proxy_q = q_role == PROXY_VIDEO_ROLE
+    proxy_k = k_role == PROXY_VIDEO_ROLE
     common_k = condition_k | audio_k
+    window = int(layout.window_chunks)
+    recent_proxy_k = proxy_k & (delta >= 0) & (delta < window)
     return (
         (condition_q & condition_k)
         | (audio_q & common_k)
-        | (clean_q & (common_k | (clean_k & (delta >= 0))))
+        | (proxy_q & (condition_k | recent_proxy_k))
+        | (clean_q & (common_k | (clean_k & (delta >= 0)) | recent_proxy_k))
         | (
             noisy_q
             & (
                 common_k
-                | (clean_k & (delta >= 1) & (delta < int(layout.window_chunks)))
+                | (clean_k & (delta >= 1) & (delta < window))
                 | (noisy_k & (delta == 0))
+                | recent_proxy_k
             )
         )
     )

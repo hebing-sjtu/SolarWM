@@ -10,6 +10,11 @@ from solarwm.errors import BackendContractError
 
 from .weights import canonical_lora_key
 
+_PROXY_ROUTES = {
+    "stage0p5": ("bidirectional", "flow_matching", "data_ward_velocity"),
+    "stage1": ("teacher_forcing", "anyflow_forward_map", "v1_5"),
+}
+
 
 def load_proxy_checkpoint(
     path: str,
@@ -17,27 +22,27 @@ def load_proxy_checkpoint(
     *,
     weight_source: str,
     torch: Any,
+    stage: str = "stage0p5",
 ) -> str:
-    """Load only proxy LoRA weights for inference or training warm-start."""
+    """Load only proxy LoRA weights of a ``stage`` checkpoint for inference or warm-start."""
 
     source = str(weight_source).strip().lower()
     if source not in {"live", "ema"}:
         raise BackendContractError("H3 proxy checkpoint weight_source must be live or ema")
+    if stage not in _PROXY_ROUTES:
+        raise BackendContractError(f"H3 proxy checkpoints have no {stage!r} route")
     verified = verify_checkpoint(Path(path))
     contract = verified.contract
     if (
         contract.family != "minimax_h3"
-        or contract.stage != "stage0p5"
-        or contract.causal_mode != "bidirectional"
-        or contract.objective != "flow_matching"
-        or contract.objective_variant != "data_ward_velocity"
+        or contract.stage != stage
+        or (contract.causal_mode, contract.objective, contract.objective_variant)
+        != _PROXY_ROUTES[stage]
         or contract.parameterization != "peft-lora-r128-alpha128"
         or contract.data_generation != "h3.ref2va-proxy.124f.v1"
         or contract.camera_translation_transform != "none"
     ):
-        raise BackendContractError(
-            "checkpoint is not a SolarWM H3 124f Ref2VA proxy LoRA"
-        )
+        raise BackendContractError(f"checkpoint is not a SolarWM H3 124f Ref2VA proxy {stage} LoRA")
 
     if source == "live":
         payload = torch.load(

@@ -97,15 +97,20 @@ def run_finished(run_dir: Path) -> bool:
         return False
 
 
+def _objective_loss(row: Mapping[str, Any]) -> float:
+    (value,) = row["losses"].values()
+    return float(value)
+
+
 def loss_summary(events: Sequence[Mapping[str, Any]], *, beta: float = 0.98) -> dict[str, Any]:
-    """Bias-corrected EMA and window means of the flow-matching loss, for trend reading."""
+    """Bias-corrected EMA and window means of the training objective, for trend reading."""
 
     steps = [row for row in events if row.get("event") == "optimizer_step"]
     if not steps:
         return {"steps": 0}
     ema = 0.0
     for index, row in enumerate(steps, 1):
-        ema = beta * ema + (1.0 - beta) * float(row["losses"]["flow_matching"])
+        ema = beta * ema + (1.0 - beta) * _objective_loss(row)
         corrected = ema / (1.0 - beta**index)
     window = max(1, min(100, len(steps) // 5))
     means = []
@@ -114,9 +119,7 @@ def loss_summary(events: Sequence[Mapping[str, Any]], *, beta: float = 0.98) -> 
         means.append(
             {
                 "steps": f"{chunk[0]['step']}-{chunk[-1]['step']}",
-                "loss": round(
-                    sum(float(r["losses"]["flow_matching"]) for r in chunk) / len(chunk), 5
-                ),
+                "loss": round(sum(_objective_loss(r) for r in chunk) / len(chunk), 5),
             }
         )
     last = steps[-1]
@@ -399,6 +402,11 @@ def eval_config(
     """An infer config that carries exactly the trained run's model and data contract."""
 
     config = json.loads(json.dumps(infer_base))
+    if config["train"]["stage"] != run_config["train"]["stage"]:
+        raise SystemExit(
+            f"infer config is {config['train']['stage']} but {task.run} trained "
+            f"{run_config['train']['stage']}"
+        )
     for section in _RUN_SECTIONS_FOR_EVAL:
         config[section] = json.loads(json.dumps(run_config[section]))
     if eval_data:

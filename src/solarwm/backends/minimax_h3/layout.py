@@ -26,6 +26,9 @@ CONDITION_ROLE = 0
 AUDIO_ROLE = 1
 CLEAN_VIDEO_ROLE = 2
 NOISY_VIDEO_ROLE = 3
+# Ref2VA Stage1 proxy rows: fixed-time condition video that a target chunk may only read as far
+# as its own chunk, so a proxy can stream in alongside the generation.
+PROXY_VIDEO_ROLE = 4
 TARGET_AUDIO_ROLE = AUDIO_ROLE
 TARGET_VIDEO_ROLE = NOISY_VIDEO_ROLE
 
@@ -582,6 +585,7 @@ __all__ = [
     "CONDITION_ROLE",
     "NOISY_VIDEO_ROLE",
     "PADDING_ROLE",
+    "PROXY_VIDEO_ROLE",
     "TARGET_AUDIO_ROLE",
     "TARGET_VIDEO_ROLE",
     "TEXT_TAG",

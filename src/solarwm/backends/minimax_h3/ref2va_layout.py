@@ -10,8 +10,10 @@ from .geometry import frame_position_grid, temporal_position_grid
 from .layout import (
     AUDIO_ROLE,
     AUDIO_TAG,
+    CLEAN_VIDEO_ROLE,
     CONDITION_ROLE,
     NOISY_VIDEO_ROLE,
+    PROXY_VIDEO_ROLE,
     VIDEO_TAG,
     H3PackedLayout,
 )
@@ -252,4 +254,144 @@ def build_ref2va_proxy_layout(
     )
 
 
-__all__ = ["H3ReferenceGeometry", "build_ref2va_proxy_layout"]
+def build_ref2va_stage1_layout(
+    text_token_tags: object,
+    *,
+    anchor_height: int,
+    anchor_width: int,
+    proxy_height: int,
+    proxy_width: int,
+    proxy_frames: int = 37,
+    num_latent_frames: int = 35,
+    target_height: int = 48,
+    target_width: int = 84,
+    num_audio_latents: int = 207,
+    align_proxy_reference_time: bool = False,
+    num_proxy_references: int = 1,
+    chunk_latent_frames: int = 5,
+    window_chunks: int = 6,
+    chunks: tuple[int, int] | None = None,
+) -> H3PackedLayout:
+    """Build ``[text | anchor | proxy | audio | clean target | noisy target]`` for Stage1.
+
+    Every position is the Stage0.5 Ref2VA document's for a ``proxy_frames``-latent proxy, so
+    a Stage0.5 LoRA keeps its geometry; target positions continue past the cached length when
+    ``num_latent_frames`` (whole chunks) is longer. Proxy rows are condition video at the fixed
+    keyframe time, chunked like the target, the last chunk shorter when the proxy ends inside
+    it. ``chunks=(first, stop)`` keeps only those chunks at their absolute positions, as one
+    rollout step sees them; chunk ids are local to the kept window.
+    """
+
+    if chunk_latent_frames <= 0 or window_chunks <= 0:
+        raise ValueError("Ref2VA Stage1 chunk and window sizes must be positive")
+    if num_latent_frames <= 0 or num_latent_frames % chunk_latent_frames:
+        raise ValueError(
+            f"Ref2VA Stage1 length {num_latent_frames} is not whole "
+            f"{chunk_latent_frames}-latent chunks"
+        )
+    total_chunks = num_latent_frames // chunk_latent_frames
+    first, stop = (0, total_chunks) if chunks is None else (int(chunks[0]), int(chunks[1]))
+    if not 0 <= first < stop <= total_chunks:
+        raise ValueError(f"Ref2VA Stage1 window {chunks} is outside [0, {total_chunks}]")
+    first_frame, stop_frame = first * chunk_latent_frames, stop * chunk_latent_frames
+    if first_frame >= proxy_frames:
+        raise ValueError(f"Ref2VA Stage1 window {chunks} starts after the proxy ends")
+    full = build_ref2va_proxy_layout(
+        text_token_tags,
+        anchor_height=anchor_height,
+        anchor_width=anchor_width,
+        proxy_frames=proxy_frames,
+        proxy_height=proxy_height,
+        proxy_width=proxy_width,
+        target_frames=proxy_frames,
+        target_height=target_height,
+        target_width=target_width,
+        num_audio_latents=num_audio_latents,
+        align_proxy_reference_time=align_proxy_reference_time,
+        num_proxy_references=num_proxy_references,
+    )
+    num_text = int(full.text_indices.size)
+    anchor_rows = (_padded(anchor_height, 2) // 2) * (_padded(anchor_width, 2) // 2)
+    proxy_frame_rows = (_padded(proxy_height, 2) // 2) * (_padded(proxy_width, 2) // 2)
+    target_frame_rows = int(full.rows_per_video_frame)
+    proxy_stop_frame = min(stop_frame, proxy_frames)
+
+    proxy_start = num_text + anchor_rows
+    proxy_source = np.concatenate(
+        [
+            _indices(
+                proxy_start + (index * proxy_frames + first_frame) * proxy_frame_rows,
+                proxy_start + (index * proxy_frames + proxy_stop_frame) * proxy_frame_rows,
+            )
+            for index in range(int(num_proxy_references))
+        ]
+    )
+    target_rows = full.target_video_indices
+    target_times = temporal_position_grid(stop_frame, float(full.position_ids[target_rows[0], 0]))
+    target_positions = np.empty((stop_frame - first_frame, target_frame_rows, 3), np.float64)
+    target_positions[:, :, 0] = target_times[first_frame:, None]
+    target_positions[:, :, 1:] = full.position_ids[target_rows[:target_frame_rows], 1:][None]
+    target_positions = target_positions.reshape(-1, 3)
+    prefix = np.concatenate((_indices(0, proxy_start), proxy_source, full.audio_indices))
+    num_target = int(target_positions.shape[0])
+    audio_start = proxy_start + int(proxy_source.size)
+    clean_start = audio_start + int(full.audio_indices.size)
+    noisy_start = clean_start + num_target
+    sequence_length = noisy_start + num_target
+
+    text_indices = _indices(0, num_text)
+    proxy_indices = _indices(proxy_start, audio_start)
+    audio_indices = _indices(audio_start, clean_start)
+    clean_indices = _indices(clean_start, noisy_start)
+    noisy_indices = _indices(noisy_start, sequence_length)
+    condition_video_indices = _indices(num_text, audio_start)
+    roles = np.full(sequence_length, CONDITION_ROLE, dtype=np.int64)
+    roles[proxy_indices] = PROXY_VIDEO_ROLE
+    roles[audio_indices] = AUDIO_ROLE
+    roles[clean_indices] = CLEAN_VIDEO_ROLE
+    roles[noisy_indices] = NOISY_VIDEO_ROLE
+    local_chunks = np.arange(stop_frame - first_frame, dtype=np.int64) // chunk_latent_frames
+    chunk_ids = np.full(sequence_length, -1, dtype=np.int64)
+    chunk_ids[proxy_indices] = np.tile(
+        np.repeat(local_chunks[: proxy_stop_frame - first_frame], proxy_frame_rows),
+        int(num_proxy_references),
+    )
+    chunk_ids[clean_indices] = np.repeat(local_chunks, target_frame_rows)
+    chunk_ids[noisy_indices] = chunk_ids[clean_indices]
+    token_tags = np.full(sequence_length, VIDEO_TAG, dtype=np.int64)
+    token_tags[: prefix.size] = full.token_tags[prefix]
+    return H3PackedLayout(
+        position_ids=np.concatenate(
+            (full.position_ids[prefix], target_positions, target_positions), axis=0
+        ),
+        token_tags=token_tags,
+        video_indices=np.concatenate((condition_video_indices, clean_indices, noisy_indices)),
+        audio_indices=audio_indices,
+        text_indices=text_indices,
+        condition_indices=np.concatenate((text_indices, condition_video_indices)),
+        target_indices=np.concatenate((audio_indices, noisy_indices)),
+        condition_video_indices=condition_video_indices,
+        audio_condition_indices=_empty(),
+        clean_video_indices=clean_indices,
+        noisy_video_indices=noisy_indices,
+        target_video_indices=noisy_indices,
+        target_audio_indices=audio_indices,
+        camera_video_indices=_empty(),
+        camera_frame_ids=_empty(),
+        row_roles=roles,
+        target_video_chunk_ids=chunk_ids,
+        num_condition_video_rows=int(condition_video_indices.size),
+        num_condition_audio_rows=0,
+        num_clean_video_rows=num_target,
+        num_noisy_video_rows=num_target,
+        rows_per_video_frame=target_frame_rows,
+        latent_height=target_height,
+        latent_width=target_width,
+        patch_size=(1, 2, 2),
+        stage="stage1",
+        window_chunks=window_chunks,
+        chunk_latent_frames=chunk_latent_frames,
+    )
+
+
+__all__ = ["H3ReferenceGeometry", "build_ref2va_proxy_layout", "build_ref2va_stage1_layout"]

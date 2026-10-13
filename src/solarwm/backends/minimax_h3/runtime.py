@@ -272,11 +272,14 @@ def _checkpoint_contract(
     target_count = int(adapter_cfg.get("expected_target_linear_modules", 312))
     stage_extras = {}
     if stage != "stage0p5":
+        proxy = str(data_cfg.get("input_mode", "")).lower() == "proxy_preencoded"
         stage_extras = {
             "chunk_latents": 5,
             "window_chunks": 6,
-            "target_latents": 45 if stage == "stage1" else 47,
-            "rollout_latents": 50,
+            "target_latents": int(data_cfg["train_target_latents"])
+            if proxy
+            else (45 if stage == "stage1" else 47),
+            "rollout_latents": 40 if proxy else 50,
             "student_rope_mode": "sliding_local" if stage == "stage2" else "native_absolute",
             "training_profile": {
                 key: value
@@ -550,7 +553,7 @@ class H3TrainingRuntime:
         self._weights_id = _base_weights_label(self.model_cfg)
         proxy_initialization_id = ""
         initialization = self.checkpoint_cfg.get("initialization")
-        if self.stage == "stage0p5" and self.proxy_mode and isinstance(initialization, Mapping):
+        if self.proxy_mode and isinstance(initialization, Mapping):
             from .proxy_weights import load_proxy_checkpoint
 
             student = initialization["student"]
@@ -568,7 +571,7 @@ class H3TrainingRuntime:
             proxy_initialization_id = self._weights_id
             if self.is_main:
                 print(f"[h3-proxy-init] student={self._weights_id}", flush=True)
-        elif self.stage != "stage0p5":
+        elif self.stage != "stage0p5" and not self.proxy_mode:
             from .weights import load_initial_weights
 
             self._weights_id = load_initial_weights(
@@ -646,6 +649,10 @@ class H3TrainingRuntime:
             self.load_checkpoint(resume)
 
     def _make_core(self) -> Any:
+        if self.proxy_mode and self.stage == "stage1":
+            from .stage1_ref2va import H3Ref2VAStage1Core
+
+            return H3Ref2VAStage1Core(self.model, self.device, self.config)
         if self.proxy_mode:
             return H3Ref2VAStage0p5Core(self.model, self.device, self.config)
         if self.stage == "stage1":

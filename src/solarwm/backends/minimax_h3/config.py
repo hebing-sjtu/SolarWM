@@ -197,25 +197,23 @@ def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0
             f"got {input_mode!r}"
         )
     if input_mode == "proxy_preencoded":
-        if action not in {"train", "infer"} or stage != "stage0p5":
+        if action not in {"train", "infer"} or stage not in {"stage0p5", "stage1"}:
             raise ConfigurationError(
-                "H3 proxy_preencoded data only supports Stage0.5 training or inference"
+                "H3 proxy_preencoded data only supports Stage0.5 or Stage1 training or inference"
             )
         for key, expected in (
             ("dataset_name", H3_PROXY_DATASET_NAME),
             ("preencode_version", H3_PROXY_PREENCODE_VERSION),
             ("pixel_frames", 124),
             ("encoded_latents", 37),
-            ("train_target_latents", 37),
+            ("train_target_latents", 35 if stage == "stage1" else 37),
             ("latent_channels", 24),
             ("qwen_video_fps", 2),
             ("anchor_short_edge", 2048),
         ):
             _equal(data, key, expected, "data")
         if not isinstance(data.get("align_proxy_reference_time"), bool):
-            raise ConfigurationError(
-                "data.align_proxy_reference_time must be an explicit boolean"
-            )
+            raise ConfigurationError("data.align_proxy_reference_time must be an explicit boolean")
         for key in ("height", "width", "latent_height", "latent_width"):
             _positive_int(data, key, "data")
         for key in ("proxy_latent_height", "proxy_latent_width"):
@@ -232,13 +230,9 @@ def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0
                         "data.proxy_variants requires data.cwm_system='w0_omni'"
                     )
                 if data.get("proxy_fit") != "center-crop":
-                    raise DataContractError(
-                        "mixed omni data.proxy_fit must be 'center-crop'"
-                    )
+                    raise DataContractError("mixed omni data.proxy_fit must be 'center-crop'")
                 if data.get("proxy_code_resize") != "nearest":
-                    raise DataContractError(
-                        "mixed omni data.proxy_code_resize must be 'nearest'"
-                    )
+                    raise DataContractError("mixed omni data.proxy_code_resize must be 'nearest'")
             else:
                 if cwm_system == OMNI_MIXED_ROLE:
                     raise DataContractError(
@@ -506,7 +500,7 @@ def _validate_validation(
                 ("pixel_frames", 124),
                 ("latent_frames", 37),
                 ("fps", 24),
-                ("num_inference_steps", 30),
+                ("num_inference_steps", 4 if stage == "stage1" else 30),
                 ("passes", ["ema"]),
             ):
                 _equal(validation, key, expected, "validation")
@@ -687,7 +681,7 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
     if action != "preencode":
         train = _mapping(config, "train")
         _validate_route(train)
-        if stage in {"stage1", "stage2"}:
+        if stage in {"stage1", "stage2"} and input_mode != "proxy_preencoded":
             validation = _mapping(config, "validation")
             if validation.get("prepared_plan") is not None:
                 _nonempty_path(validation, "prepared_plan", "validation")
@@ -744,8 +738,7 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
                         )
                     if student.get("weight_source") not in {"live", "ema"}:
                         raise ConfigurationError(
-                            "checkpoint.initialization.student.weight_source "
-                            "must be live or ema"
+                            "checkpoint.initialization.student.weight_source must be live or ema"
                         )
                     _equal(
                         student,

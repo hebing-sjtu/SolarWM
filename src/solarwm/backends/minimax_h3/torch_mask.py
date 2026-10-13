@@ -5,8 +5,17 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from .layout import AUDIO_ROLE, CLEAN_VIDEO_ROLE, CONDITION_ROLE, NOISY_VIDEO_ROLE, H3PackedLayout
+from .layout import (
+    AUDIO_ROLE,
+    CLEAN_VIDEO_ROLE,
+    CONDITION_ROLE,
+    NOISY_VIDEO_ROLE,
+    PROXY_VIDEO_ROLE,
+    H3PackedLayout,
+)
 from .mask import stage1_window_allows as stage1_w6_allows
+
+Run = tuple[int, int, int, int]
 
 
 def _validate_layout(layout: H3PackedLayout) -> None:
@@ -16,27 +25,7 @@ def _validate_layout(layout: H3PackedLayout) -> None:
         raise ValueError("Stage1 W6 TF requires explicit clean and noisy video copies")
 
 
-def build_stage1_w6_block_mask(
-    layout: H3PackedLayout,
-    *,
-    batch_size: int | None = None,
-    num_heads: int | None = None,
-    device: Any = None,
-    block_size: int | tuple[int, int] = 128,
-) -> Any:
-    """Build the exact W6 ``BlockMask`` without a token-level dense mask.
-
-    ``create_block_mask`` evaluates a logical ``[Q,K]`` grid and is unsafe for
-    H3's 29k/72k-row Stage1 documents unless its compilation succeeds.  This
-    builder instead derives full and partial tiles directly from the small set
-    of contiguous role/chunk runs.  Peak construction memory is therefore
-    ``O(ceil(Q/128)^2)`` block metadata, never ``O(Q^2)`` token metadata.
-    """
-
-    _validate_layout(layout)
-    import torch
-    from torch.nn.attention.flex_attention import BlockMask
-
+def _tile_size(batch_size: int | None, num_heads: int | None, block_size: Any) -> int:
     if batch_size not in (None, 1):
         raise ValueError("H3 W6 currently requires batch_size=1")
     if num_heads is not None:
@@ -44,11 +33,20 @@ def build_stage1_w6_block_mask(
     if isinstance(block_size, tuple):
         if tuple(block_size) != (128, 128):
             raise ValueError("H3 W6 requires FlexAttention block_size=(128,128)")
-        tile_size = 128
-    else:
-        tile_size = int(block_size)
-        if tile_size != 128:
-            raise ValueError("H3 W6 requires FlexAttention block_size=128")
+        return 128
+    if int(block_size) != 128:
+        raise ValueError("H3 W6 requires FlexAttention block_size=128")
+    return 128
+
+
+def _role_chunk_runs(layout: H3PackedLayout) -> tuple[list[Run], Any]:
+    """The handful of contiguous ``(start, end, role, chunk)`` runs of a packed document.
+
+    A typical seven-chunk Stage1 document has condition, audio, seven clean and seven noisy
+    runs even though it contains tens of thousands of rows.
+    """
+
+    import torch
 
     roles_cpu = layout.row_roles.detach().to(device="cpu", dtype=torch.long)
     chunks_cpu = layout.target_video_chunk_ids.detach().to(device="cpu", dtype=torch.long)
@@ -57,11 +55,6 @@ def build_stage1_w6_block_mask(
         sequence_length,
     ):
         raise ValueError("H3 W6 layout role/chunk rows do not match sequence_length")
-    window = int(layout.window_chunks)
-
-    # Find the handful of contiguous (role, chunk) runs.  A typical seven-
-    # chunk Stage1 document has condition, audio, seven clean and seven noisy
-    # runs even though it contains tens of thousands of rows.
     changes = (roles_cpu[1:] != roles_cpu[:-1]) | (chunks_cpu[1:] != chunks_cpu[:-1])
     boundaries = [int(value) + 1 for value in torch.nonzero(changes).flatten()]
     starts = [0, *boundaries]
@@ -75,6 +68,15 @@ def build_stage1_w6_block_mask(
         )
         for start, end in zip(starts, ends, strict=True)
     ]
+    return runs, chunks_cpu
+
+
+def _sparse_tile_metadata(
+    runs: list[Run], *, sequence_length: int, window: int, tile_size: int, device: Any
+) -> tuple[Any, Any, Any, Any]:
+    """Full and partial ``[Q/128, K/128]`` tiles of the W6 visibility, as ordered metadata."""
+
+    import torch
 
     def merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
         merged: list[tuple[int, int]] = []
@@ -153,6 +155,81 @@ def build_stage1_w6_block_mask(
 
     partial_counts, partial_indices = ordered_metadata(partial_tiles)
     full_counts, full_indices = ordered_metadata(full_tiles)
+    return partial_counts, partial_indices, full_counts, full_indices
+
+
+def _static_block_mask(
+    metadata: tuple[Any, Any, Any, Any], mask_mod: Any, *, sequence_length: int, tile_size: int
+) -> Any:
+    import torch
+    from torch.nn.attention.flex_attention import BlockMask
+
+    partial_counts, partial_indices, full_counts, full_indices = metadata
+    block_mask = BlockMask.from_kv_blocks(
+        partial_counts,
+        partial_indices,
+        full_counts,
+        full_indices,
+        BLOCK_SIZE=tile_size,
+        mask_mod=mask_mod,
+        seq_lengths=(sequence_length, sequence_length),
+    )
+    # PyTorch 2.6 Flex autotuning requires concrete metadata dimensions.
+    # Power-of-two zero-count buckets keep only these sparse tensors static;
+    # real token lengths and the visibility of every actual tile are unchanged.
+    for value in (
+        block_mask.kv_num_blocks,
+        block_mask.kv_indices,
+        block_mask.full_kv_num_blocks,
+        block_mask.full_kv_indices,
+        block_mask.q_num_blocks,
+        block_mask.q_indices,
+        block_mask.full_q_num_blocks,
+        block_mask.full_q_indices,
+    ):
+        torch._dynamo.mark_static(value)
+    return block_mask
+
+
+def _chunk_runs(start: int, length: int, chunk_rows: int, role: int, first_chunk: int) -> list[Run]:
+    return [
+        (
+            start + offset,
+            start + min(offset + chunk_rows, length),
+            role,
+            first_chunk + offset // chunk_rows,
+        )
+        for offset in range(0, length, chunk_rows)
+    ]
+
+
+def build_stage1_w6_block_mask(
+    layout: H3PackedLayout,
+    *,
+    batch_size: int | None = None,
+    num_heads: int | None = None,
+    device: Any = None,
+    block_size: int | tuple[int, int] = 128,
+) -> Any:
+    """Build the exact W6 ``BlockMask`` without a token-level dense mask.
+
+    ``create_block_mask`` evaluates a logical ``[Q,K]`` grid and is unsafe for
+    H3's 29k/72k-row Stage1 documents unless its compilation succeeds.  This
+    builder instead derives full and partial tiles directly from the small set
+    of contiguous role/chunk runs.  Peak construction memory is therefore
+    ``O(ceil(Q/128)^2)`` block metadata, never ``O(Q^2)`` token metadata.
+    """
+
+    _validate_layout(layout)
+    import torch
+
+    tile_size = _tile_size(batch_size, num_heads, block_size)
+    runs, chunks_cpu = _role_chunk_runs(layout)
+    sequence_length = int(layout.sequence_length)
+    window = int(layout.window_chunks)
+    metadata = _sparse_tile_metadata(
+        runs, sequence_length=sequence_length, window=window, tile_size=tile_size, device=device
+    )
 
     # Capture only device scalars. PyTorch 2.6 dynamic Flex lifts the size of
     # a captured lookup table into a symbolic autotuning input it cannot key.
@@ -178,19 +255,12 @@ def build_stage1_w6_block_mask(
         expected_runs.append((0, condition_end, CONDITION_ROLE, -1))
     if clean_start > condition_end:
         expected_runs.append((condition_end, clean_start, AUDIO_ROLE, -1))
-    for start, length, role, first_chunk in (
-        (clean_start, clean_rows, CLEAN_VIDEO_ROLE, clean_chunk_start),
-        (noisy_start, noisy_rows, NOISY_VIDEO_ROLE, noisy_chunk_start),
-    ):
-        expected_runs.extend(
-            (
-                start + offset,
-                start + offset + chunk_rows,
-                role,
-                first_chunk + offset // chunk_rows,
-            )
-            for offset in range(0, length, chunk_rows)
-        )
+    expected_runs += _chunk_runs(
+        clean_start, clean_rows, chunk_rows, CLEAN_VIDEO_ROLE, clean_chunk_start
+    )
+    expected_runs += _chunk_runs(
+        noisy_start, noisy_rows, chunk_rows, NOISY_VIDEO_ROLE, noisy_chunk_start
+    )
     if runs != expected_runs:
         raise ValueError("H3 W6 requires canonical contiguous role/chunk runs")
     (
@@ -244,27 +314,138 @@ def build_stage1_w6_block_mask(
         )
         return condition_visibility | audio_visibility | clean_visibility | noisy_visibility
 
-    block_mask = BlockMask.from_kv_blocks(
-        partial_counts,
-        partial_indices,
-        full_counts,
-        full_indices,
-        BLOCK_SIZE=tile_size,
-        mask_mod=mask_mod,
-        seq_lengths=(sequence_length, sequence_length),
+    return _static_block_mask(
+        metadata, mask_mod, sequence_length=sequence_length, tile_size=tile_size
     )
-    # PyTorch 2.6 Flex autotuning requires concrete metadata dimensions.
-    # Power-of-two zero-count buckets keep only these sparse tensors static;
-    # real token lengths and the visibility of every actual tile are unchanged.
-    for metadata in (
-        block_mask.kv_num_blocks,
-        block_mask.kv_indices,
-        block_mask.full_kv_num_blocks,
-        block_mask.full_kv_indices,
-        block_mask.q_num_blocks,
-        block_mask.q_indices,
-        block_mask.full_q_num_blocks,
-        block_mask.full_q_indices,
+
+
+def build_ref2va_stage1_block_mask(
+    layout: H3PackedLayout,
+    *,
+    device: Any = None,
+    block_size: int | tuple[int, int] = 128,
+) -> Any:
+    """The W6 ``BlockMask`` of a ``[text+anchor | proxy | audio | clean | noisy]`` document.
+
+    Proxy rows are one contiguous run per reference, split into the target's chunks; the last
+    may be shorter. See :func:`stage1_window_allows` for who reads them.
+    """
+
+    _validate_layout(layout)
+    import torch
+
+    tile_size = _tile_size(None, None, block_size)
+    runs, chunks_cpu = _role_chunk_runs(layout)
+    sequence_length = int(layout.sequence_length)
+    window = int(layout.window_chunks)
+    metadata = _sparse_tile_metadata(
+        runs, sequence_length=sequence_length, window=window, tile_size=tile_size, device=device
+    )
+
+    proxy_runs = [run for run in runs if run[2] == PROXY_VIDEO_ROLE]
+    if not proxy_runs:
+        raise ValueError("a Ref2VA Stage1 mask needs proxy rows")
+    proxy_start, proxy_end = proxy_runs[0][0], proxy_runs[-1][1]
+    proxy_chunk_rows = proxy_runs[0][1] - proxy_runs[0][0]
+    references = sum(1 for run in proxy_runs if run[3] == proxy_runs[0][3])
+    reference_rows = (proxy_end - proxy_start) // references
+    clean_start = proxy_end + int(layout.audio_indices.numel())
+    clean_rows = int(layout.clean_video_indices.numel())
+    noisy_rows = int(layout.noisy_video_indices.numel())
+    noisy_start = clean_start + clean_rows
+    chunk_rows = int(layout.rows_per_video_frame) * int(layout.chunk_latent_frames or 0)
+    if (
+        chunk_rows <= 0
+        or clean_rows % chunk_rows
+        or clean_rows != noisy_rows
+        or noisy_start + noisy_rows != sequence_length
+        or reference_rows * references != proxy_end - proxy_start
+        or -(-reference_rows // proxy_chunk_rows) != clean_rows // chunk_rows
     ):
-        torch._dynamo.mark_static(metadata)
-    return block_mask
+        raise ValueError("H3 Ref2VA W6 requires whole-chunk [C|P|A|clean|noisy] packing")
+    first_chunk = int(chunks_cpu[clean_start])
+    expected_runs = [(0, proxy_start, CONDITION_ROLE, -1)]
+    for reference in range(references):
+        expected_runs += _chunk_runs(
+            proxy_start + reference * reference_rows,
+            reference_rows,
+            proxy_chunk_rows,
+            PROXY_VIDEO_ROLE,
+            first_chunk,
+        )
+    if clean_start > proxy_end:
+        expected_runs.append((proxy_end, clean_start, AUDIO_ROLE, -1))
+    expected_runs += _chunk_runs(clean_start, clean_rows, chunk_rows, CLEAN_VIDEO_ROLE, first_chunk)
+    expected_runs += _chunk_runs(noisy_start, noisy_rows, chunk_rows, NOISY_VIDEO_ROLE, first_chunk)
+    if runs != expected_runs:
+        raise ValueError("H3 Ref2VA W6 requires canonical contiguous role/chunk runs")
+    (
+        proxy_start,
+        proxy_end,
+        reference_rows,
+        proxy_chunk_rows,
+        clean_start,
+        noisy_start,
+        sequence_end,
+        chunk_rows,
+        window_bound,
+    ) = (
+        torch.tensor(value, dtype=torch.long, device=device)
+        for value in (
+            proxy_start,
+            proxy_end,
+            reference_rows,
+            proxy_chunk_rows,
+            clean_start,
+            noisy_start,
+            sequence_length,
+            chunk_rows,
+            window,
+        )
+    )
+
+    def role_and_chunk(index: Any) -> tuple[Any, Any, Any, Any, Any, Any]:
+        valid = (index >= 0) & (index < sequence_end)
+        condition = valid & (index < proxy_start)
+        proxy = valid & (index >= proxy_start) & (index < proxy_end)
+        audio = valid & (index >= proxy_end) & (index < clean_start)
+        clean = valid & (index >= clean_start) & (index < noisy_start)
+        noisy = valid & (index >= noisy_start)
+        video_start = torch.where(index >= noisy_start, noisy_start, clean_start)
+        target_chunk = torch.div(index - video_start, chunk_rows, rounding_mode="floor")
+        proxy_chunk = torch.div(
+            torch.remainder(index - proxy_start, reference_rows),
+            proxy_chunk_rows,
+            rounding_mode="floor",
+        )
+        return condition, proxy, audio, clean, noisy, torch.where(proxy, proxy_chunk, target_chunk)
+
+    def mask_mod(_batch: Any, _head: Any, query_index: Any, key_index: Any) -> Any:
+        condition_query, proxy_query, audio_query, clean_query, noisy_query, query_chunk = (
+            role_and_chunk(query_index)
+        )
+        condition_key, proxy_key, audio_key, clean_key, noisy_key, key_chunk = role_and_chunk(
+            key_index
+        )
+        delta = query_chunk - key_chunk
+        common_key = condition_key | audio_key
+        recent_proxy = proxy_key & (delta >= 0) & (delta < window_bound)
+        return (
+            (condition_query & condition_key)
+            | (audio_query & common_key)
+            | (proxy_query & (condition_key | recent_proxy))
+            | (clean_query & (common_key | (clean_key & (delta >= 0)) | recent_proxy))
+            | (
+                noisy_query
+                & (
+                    common_key
+                    | (clean_key & (delta >= 1) & (delta < window_bound))
+                    | (noisy_key & (delta == 0))
+                    | recent_proxy
+                )
+            )
+        )
+
+    return _static_block_mask(
+        metadata, mask_mod, sequence_length=sequence_length, tile_size=tile_size
+    )
