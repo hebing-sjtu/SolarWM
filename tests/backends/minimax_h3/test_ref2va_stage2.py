@@ -262,3 +262,43 @@ def test_stage2_proxy_checkpoint_route(tmp_path: Path) -> None:
     save(tmp_path / "dmd", "stage2", 10, 3.0)
     load_proxy_checkpoint(str(tmp_path / "dmd"), FakeLoRA(), stage="stage2", **common)
     assert torch.equal(parameter, torch.full((2, 2), 3.0, dtype=torch.bfloat16))
+
+
+def test_sgf_training_records_checkpoints_for_the_proxy_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from solarwm.backends.minimax_h3 import proxy_loop, stage2_runtime
+
+    class FakeRuntime:
+        is_main = True
+
+        def __init__(self, config: dict) -> None:
+            self.global_step = 0
+            self.reader = type("Reader", (), {"close": lambda self: None})()
+
+        def train_outer_step(self) -> dict:
+            self.global_step += 1
+            return {
+                "loss_critic": 0.1,
+                "student_updated": 0.0,
+                "lr": 1.0e-6,
+                "critic_grad_norm": 0.0,
+                "compute_time_s": 0.0,
+                "peak_allocated_gib": 0.0,
+            }
+
+        def save_checkpoint(self, step: int) -> str:
+            path = tmp_path / f"checkpoint_model_{step:06d}"
+            path.mkdir()
+            (path / "COMPLETE.json").write_text("{}", encoding="utf-8")
+            return f"checkpoint-{step}"
+
+    monkeypatch.setattr(stage2_runtime, "H3SGFTrainingRuntime", FakeRuntime)
+    config = {
+        "train": {"max_steps": 4},
+        "checkpoint": {"save_every_steps": 2},
+        "validation": {"validate_every_steps": 0, "smoke_step": 0},
+        "runtime": {"output_dir": str(tmp_path), "tracking": {"enabled": False}},
+    }
+    assert stage2_runtime.run_sgf_training(config) == 0
+    assert proxy_loop.completed_checkpoints(tmp_path) == [2, 4]

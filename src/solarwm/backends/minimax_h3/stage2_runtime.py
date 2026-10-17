@@ -326,7 +326,16 @@ def run_sgf_training(config: Any) -> int:
                     }
                 )
             if policy.should_save(step):
-                runtime.save_checkpoint(step)
+                checkpoint_id = runtime.save_checkpoint(step)
+                if sink is not None:
+                    sink(
+                        {
+                            "schema": "solarwm.training-event.v1",
+                            "event": "checkpoint",
+                            "step": step,
+                            "checkpoint_id": checkpoint_id,
+                        }
+                    )
             if policy.should_validate(step):
                 report = runtime.validate(step)
                 if sink is not None:
