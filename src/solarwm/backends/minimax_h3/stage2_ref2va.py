@@ -21,7 +21,13 @@ from .proxy_artifacts import H3ProxyArtifactBatch
 from .sgf import h3_sgf_schedule, h3_sgf_score_timesteps
 from .sgf_rollout import H3SGFRollout
 from .stage0p5_ref2va import _condition_rows
-from .stage1_ref2va import CHUNK_LATENTS, KEYFRAME_TIME, WINDOW_CHUNKS, H3Ref2VAStage1Core
+from .stage1_ref2va import (
+    CHUNK_LATENTS,
+    KEYFRAME_TIME,
+    WINDOW_CHUNKS,
+    H3Ref2VAStage1Core,
+    given_in_chunk,
+)
 from .torch_flow import predict_clean_sample, sample_shifted_timestep, scale_noise
 from .torch_mask import _role_chunk_runs
 
@@ -315,11 +321,12 @@ class H3Ref2VASGFCore(H3Ref2VAStage1Core):
         chunk: int,
         latents: Any,
         timestep: Any,
-        fixed: int,
+        held: Any,
         commit: bool,
     ) -> Any:
         import torch
 
+        fixed = 0 if held is None else int(held.shape[2])
         rows_per_frame = int(layout.rows_per_video_frame)
         chunk_rows = CHUNK_LATENTS * rows_per_frame
         noisy = layout.noisy_video_indices[chunk * chunk_rows : (chunk + 1) * chunk_rows]
@@ -346,7 +353,7 @@ class H3Ref2VASGFCore(H3Ref2VAStage1Core):
         ).float()
         x0 = predict_clean_sample(latents, velocity, timestep)
         if fixed:
-            x0[:, :, :fixed] = inputs.given_value
+            x0[:, :, :fixed] = held
         return x0
 
     def rollout(
@@ -375,11 +382,29 @@ class H3Ref2VASGFCore(H3Ref2VAStage1Core):
             with torch.no_grad():
                 self._prefill(inputs, layout, cache)
                 for chunk in range(self.rollout_chunks):
-                    fixed = inputs.given if chunk == 0 else 0
+                    low, fixed = given_in_chunk(inputs.given, chunk)
+                    held = inputs.given_value[:, :, low : low + fixed] if fixed else None
+                    if fixed == CHUNK_LATENTS:
+                        # Wholly given: commit it as it stands; every rank skips it alike.
+                        noisy_exits.append(held.clone())
+                        committed.append(held.clone())
+                        self._chunk_forward(
+                            inputs,
+                            layout,
+                            cache,
+                            chunk=chunk,
+                            latents=held,
+                            timestep=1.0,
+                            held=held,
+                            commit=True,
+                        )
+                        if progress is not None:
+                            progress(chunk + 1)
+                        continue
                     current = noise[:, :, chunk * CHUNK_LATENTS : (chunk + 1) * CHUNK_LATENTS]
                     if fixed:
                         current = current.clone()
-                        current[:, :, :fixed] = inputs.given_value
+                        current[:, :, :fixed] = held
                     exit_x0 = None
                     # Four forwards on every rank: FSDP collectives need identical counts.
                     for step, timestep in enumerate(schedule.timesteps):
@@ -392,7 +417,7 @@ class H3Ref2VASGFCore(H3Ref2VAStage1Core):
                             chunk=chunk,
                             latents=current,
                             timestep=timestep,
-                            fixed=fixed,
+                            held=held,
                             commit=False,
                         )
                         if not bool(torch.isfinite(x0).all()):
@@ -408,7 +433,7 @@ class H3Ref2VASGFCore(H3Ref2VAStage1Core):
                                 schedule.timesteps[step + 1],
                             )
                             if fixed:
-                                current[:, :, :fixed] = inputs.given_value
+                                current[:, :, :fixed] = held
                     committed.append(exit_x0)
                     self._chunk_forward(
                         inputs,
@@ -417,7 +442,7 @@ class H3Ref2VASGFCore(H3Ref2VAStage1Core):
                         chunk=chunk,
                         latents=exit_x0,
                         timestep=1.0,
-                        fixed=fixed,
+                        held=held,
                         commit=True,
                     )
                     if progress is not None:

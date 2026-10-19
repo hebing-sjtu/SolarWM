@@ -1477,6 +1477,10 @@ def run_inference(config: Mapping[str, Any]) -> int:
 
         return run_source_length_inference(config)
     if str(config.get("data", {}).get("input_mode", "")).lower() == "proxy_preencoded":
+        if config.get("inference", {}).get("proxy_take"):
+            from .proxy_rollout import run_proxy_rollout
+
+            return run_proxy_rollout(config)
         from .proxy_inference import run_proxy_inference
 
         return run_proxy_inference(config)

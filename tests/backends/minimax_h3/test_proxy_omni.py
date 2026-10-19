@@ -57,7 +57,7 @@ def test_mixed_single_reference_examples_validate_with_both_time_policies() -> N
 def test_mixed_single_reference_role_and_variant_contract_are_explicit() -> None:
     config = _config(MIXED)
     config["data"]["cwm_system"] = "w0"
-    with pytest.raises(ConfigurationError, match=r"requires data.cwm_system='w0_omni'"):
+    with pytest.raises(ConfigurationError, match=r"requires data.cwm_system in \['w0_omni'"):
         validate_h3_config(config)
     config = _config(MIXED)
     del config["data"]["proxy_variants"]

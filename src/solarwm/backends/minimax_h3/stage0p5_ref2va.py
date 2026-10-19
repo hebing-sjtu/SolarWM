@@ -8,7 +8,7 @@ from typing import Any
 from .distributed import broadcast_sp_tensor, is_sequence_parallel_enabled
 from .flow import make_shifted_schedule
 from .layout import build_row_timesteps, patchify_video, unpatchify_video
-from .proxy_artifacts import H3ProxyArtifactBatch
+from .proxy_artifacts import H3ProxyArtifactBatch, batch_given_frames
 from .ref2va_layout import build_ref2va_proxy_layout
 from .stage0p5 import H3TorchLayout
 
@@ -56,6 +56,9 @@ def _condition_rows(anchor: Any, proxies: Any) -> Any:
 
 class H3Ref2VAStage0p5Core:
     """Train the Ref2VA partition on ``[text|anchor|proxy_1..proxy_R|audio|target]``."""
+
+    # Set by a long-take rollout: generation then also serves the continuation role.
+    continuation = False
 
     def __init__(self, model: Any, device: Any, config: Any) -> None:
         self.model = model
@@ -303,15 +306,7 @@ class H3Ref2VAStage0p5Core:
 
         import torch
 
-        expected_role = str(self.config["data"]["cwm_system"])
-        if batch.cwm_system != expected_role:
-            raise RuntimeError(
-                f"H3 proxy CWM role changed at inference: {batch.cwm_system!r} != {expected_role!r}"
-            )
-        given = int(batch.num_given_latent_frames)
-        if given != int(self.config["data"]["num_given_latent_frames"]):
-            raise RuntimeError("H3 proxy inference given-frame count differs from its CWM role")
-
+        given = batch_given_frames(self.config["data"], batch, continuation=self.continuation)
         generator = torch.Generator(device=self.device).manual_seed(int(noise_seed))
         clean = batch.target_latents.to(
             self.device, dtype=torch.float32, non_blocking=True

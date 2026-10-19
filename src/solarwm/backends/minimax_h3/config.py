@@ -13,10 +13,11 @@ from .camera import h3_fused_prope_contract
 from .codec import H3_PREENCODE_VERSION
 from .geometry import proxy_geometry_from_data, validate_stage0p5_geometry
 from .proxy_artifacts import (
+    CWM_CONTINUATION_ROLES,
     CWM_GIVEN_FRAMES,
     H3_PROXY_DATASET_NAME,
     H3_PROXY_PREENCODE_VERSION,
-    OMNI_MIXED_ROLE,
+    OMNI_ROLES,
     check_role_references,
     oc_reference_from_data,
     proxy_references_from_data,
@@ -227,18 +228,18 @@ def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0
         try:
             proxy_variants = proxy_variants_from_data(data)
             if proxy_variants:
-                if cwm_system != OMNI_MIXED_ROLE:
+                if cwm_system not in OMNI_ROLES:
                     raise DataContractError(
-                        "data.proxy_variants requires data.cwm_system='w0_omni'"
+                        f"data.proxy_variants requires data.cwm_system in {list(OMNI_ROLES)}"
                     )
                 if data.get("proxy_fit") != "center-crop":
                     raise DataContractError("mixed omni data.proxy_fit must be 'center-crop'")
                 if data.get("proxy_code_resize") != "nearest":
                     raise DataContractError("mixed omni data.proxy_code_resize must be 'nearest'")
             else:
-                if cwm_system == OMNI_MIXED_ROLE:
+                if cwm_system in OMNI_ROLES:
                     raise DataContractError(
-                        "data.cwm_system='w0_omni' requires data.proxy_variants"
+                        f"data.cwm_system={cwm_system!r} requires data.proxy_variants"
                     )
                 check_role_references(cwm_system, proxy_references_from_data(data))
             oc_reference_from_data(data)
@@ -672,6 +673,18 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
                 "Source-length inference requires explicit live or ema weights"
             )
         _positive_int(inference, "expected_step", "inference")
+    if inference.get("proxy_take") is not None:
+        if action != "infer" or full_length:
+            raise ConfigurationError("inference.proxy_take is a fixed-length proxy inference input")
+        _nonempty_path(inference, "proxy_take", "inference")
+        if str(config.get("data", {}).get("input_mode", "")).lower() != "proxy_preencoded":
+            raise ConfigurationError("inference.proxy_take requires data.input_mode=proxy_preencoded")
+        if config.get("data", {}).get("cwm_system") not in CWM_CONTINUATION_ROLES:
+            raise ConfigurationError(
+                f"inference.proxy_take requires data.cwm_system in {sorted(CWM_CONTINUATION_ROLES)}"
+            )
+        if inference.get("proxy_take_cache") is not None:
+            _nonempty_path(inference, "proxy_take_cache", "inference")
     model = _mapping(config, "model")
     data = _mapping(config, "data")
     metadata = config.get("metadata", {})

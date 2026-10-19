@@ -16,7 +16,7 @@ from solarwm.training.anyflow import apply_timestep_shift, sample_anyflow_time_p
 from .anyflow_loss import h3_anyflow_v15_loss
 from .distributed import get_dp_group, get_dp_rank, get_dp_world_size, is_sequence_parallel_enabled
 from .layout import patchify_video, unpatchify_video
-from .proxy_artifacts import H3ProxyArtifactBatch
+from .proxy_artifacts import H3ProxyArtifactBatch, batch_given_frames
 from .ref2va_layout import build_ref2va_stage1_layout
 from .stage0p5_ref2va import (
     H3Ref2VAStage0p5Core,
@@ -34,6 +34,13 @@ CHUNK_LATENTS = 5
 WINDOW_CHUNKS = 6
 
 
+def given_in_chunk(given: int, chunk: int) -> tuple[int, int]:
+    """``(start, count)`` of the given latents inside ``chunk``, in timeline latents."""
+
+    start = int(chunk) * CHUNK_LATENTS
+    return start, min(max(int(given) - start, 0), CHUNK_LATENTS)
+
+
 def ref2va_row_time_pairs(
     layout: Any,
     *,
@@ -43,13 +50,14 @@ def ref2va_row_time_pairs(
     current_chunk: int | None,
     given_rows: int,
     device: Any,
+    given_start_row: int = 0,
 ) -> tuple[Any, Any, Any]:
     """Distinct native ``(t, r)`` pairs and each row's index into them.
 
     Anchor and proxy rows keep the keyframe time, text and clean history ``t=1``, audio its
     own time, all with ``r=t``. Noisy rows of ``current_chunk`` (every chunk when ``None``)
-    carry the interval, except the first ``given_rows`` noisy rows: CWM given latents held at
-    the keyframe time.
+    carry the interval, except ``given_rows`` noisy rows from ``given_start_row`` on: CWM
+    given latents held at the keyframe time.
     """
 
     import torch
@@ -67,7 +75,8 @@ def ref2va_row_time_pairs(
     t[noisy] = torch.as_tensor(video_t, dtype=torch.float32, device=device).reshape(())
     r[noisy] = torch.as_tensor(video_r, dtype=torch.float32, device=device).reshape(())
     if given_rows:
-        fixed = layout.noisy_video_indices[: int(given_rows)]
+        start = int(given_start_row)
+        fixed = layout.noisy_video_indices[start : start + int(given_rows)]
         t[fixed] = KEYFRAME_TIME
         r[fixed] = KEYFRAME_TIME
     pairs, inverse = torch.unique(
@@ -148,17 +157,7 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
     def _inputs(self, batch: H3ProxyArtifactBatch) -> tuple[Any, ...]:
         import torch
 
-        expected_role = str(self.config["data"]["cwm_system"])
-        if batch.cwm_system != expected_role:
-            raise RuntimeError(
-                f"H3 proxy CWM role changed inside one run: {batch.cwm_system!r} "
-                f"!= {expected_role!r}"
-            )
-        given = int(batch.num_given_latent_frames)
-        if given != int(self.config["data"]["num_given_latent_frames"]):
-            raise RuntimeError("H3 proxy given-frame count differs from cached CWM role")
-        if given > CHUNK_LATENTS:
-            raise RuntimeError("Ref2VA Stage1 holds given latents inside the first chunk")
+        given = batch_given_frames(self.config["data"], batch, continuation=self.continuation)
         clean = batch.target_latents.to(
             self.device, dtype=torch.float32, non_blocking=True
         ).unsqueeze(0)
@@ -346,6 +345,12 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
         generated: list[Any] = []
         with torch.no_grad():
             for chunk in range(self.rollout_chunks):
+                low, fixed = given_in_chunk(given, chunk)
+                held = given_value[:, :, low : low + fixed] if fixed else None
+                if fixed == CHUNK_LATENTS:
+                    # Wholly given: it is history as it stands, and every rank skips it alike.
+                    generated.append(held.contiguous())
+                    continue
                 first = max(0, chunk - (WINDOW_CHUNKS - 1))
                 layout, mask = self.window(
                     tags, pictures, proxy, frames=frames, chunks=(first, chunk + 1)
@@ -365,9 +370,8 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
                 history = patchify_video(torch.cat((*generated[first:chunk], placeholder), dim=2))
                 noisy = torch.zeros_like(history)
                 current = noise_like(placeholder)
-                fixed = given if chunk == 0 else 0
                 if fixed:
-                    current[:, :, :fixed] = given_value
+                    current[:, :, :fixed] = held
                 for step in range(int(num_inference_steps)):
                     noisy[:, -CHUNK_LATENTS * rows_per_frame :] = patchify_video(current)
                     audio_t = audio_schedule.timesteps[step]
@@ -384,6 +388,7 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
                             audio_t=audio_t,
                             current_chunk=chunk - first,
                             given_rows=fixed * rows_per_frame,
+                            given_start_row=(chunk - first) * CHUNK_LATENTS * rows_per_frame,
                             device=self.device,
                         ),
                     )
@@ -396,7 +401,7 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
                     ).float()
                     current = current + (sigmas[step] - sigmas[step + 1]) * velocity
                     if fixed:
-                        current[:, :, :fixed] = given_value
+                        current[:, :, :fixed] = held
                 if not bool(torch.isfinite(current).all().item()):
                     raise FloatingPointError(
                         f"H3 Ref2VA Stage1 rollout chunk {chunk} is non-finite"
@@ -405,4 +410,4 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
         return torch.cat(generated, dim=2)[:, :, : self.target_frames].contiguous()
 
 
-__all__ = ["H3Ref2VAStage1Core", "ref2va_row_time_pairs"]
+__all__ = ["H3Ref2VAStage1Core", "given_in_chunk", "ref2va_row_time_pairs"]

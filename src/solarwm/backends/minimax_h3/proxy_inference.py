@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -40,8 +41,24 @@ def _next_distinct_donor(
     )
 
 
-def run_proxy_inference(config: Mapping[str, Any]) -> int:
-    """Evaluate cached proxy documents on one torchrun worker."""
+@dataclass
+class ProxyRuntime:
+    """One worker's distributed state, the adapted model and its stage's sampling core."""
+
+    torch: Any
+    dist: Any
+    topology: Topology
+    device: Any
+    core: Any
+    generation: dict[str, Any]
+    weights_id: str
+    weight_source: str
+    checkpoint_path: str
+    checkpoint_step: int
+
+
+def load_proxy_runtime(config: Mapping[str, Any]) -> ProxyRuntime:
+    """Join torchrun, load the transformer and its LoRA weights, and build the stage core."""
 
     torch, _diffusers, _transformers = require_h3_runtime()
     import torch.distributed as dist
@@ -52,9 +69,7 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
         _base_model_load_receipt,
         _base_weights_label,
         _collective_call,
-        _collective_failures,
         _topology,
-        _validation_schedule,
     )
 
     distributed = config["distributed"]
@@ -120,23 +135,6 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
     else:
         weights_id = _base_weights_label(config["model"])
     checkpoint_step = int(weights_id.rsplit("step=", 1)[1]) if checkpoint_path else 0
-
-    sample_count, num_waves = _validation_schedule(config["validation"], topology)
-    stream = H3ProxyPtStream(
-        config,
-        topology,
-        selection_seed=int(config["validation"]["selection_seed"]),
-    )
-    ablation_mode = str(config["validation"].get("proxy_ablation", "correct")).strip().lower()
-    donor_stream = (
-        H3ProxyPtStream(
-            config,
-            topology,
-            selection_seed=int(config["validation"]["selection_seed"]) + 1,
-        )
-        if ablation_mode == "shuffled"
-        else None
-    )
     if stage == "stage2":
         from .stage2_ref2va import H3Ref2VASGFCore
 
@@ -163,6 +161,47 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
             "generation_mode": "bidirectional-ref2va-proxy",
             "sample_solver": "shifted-euler-data-ward",
         }
+    return ProxyRuntime(
+        torch=torch,
+        dist=dist,
+        topology=topology,
+        device=device,
+        core=core,
+        generation=generation,
+        weights_id=weights_id,
+        weight_source=weight_source,
+        checkpoint_path=checkpoint_path,
+        checkpoint_step=checkpoint_step,
+    )
+
+
+def run_proxy_inference(config: Mapping[str, Any]) -> int:
+    """Evaluate cached proxy documents on one torchrun worker."""
+
+    from .runtime import _collective_call, _collective_failures, _validation_schedule
+
+    runtime = load_proxy_runtime(config)
+    dist, topology, device, core = runtime.dist, runtime.topology, runtime.device, runtime.core
+    generation, weights_id = runtime.generation, runtime.weights_id
+    weight_source, checkpoint_path = runtime.weight_source, runtime.checkpoint_path
+    checkpoint_step = runtime.checkpoint_step
+
+    sample_count, num_waves = _validation_schedule(config["validation"], topology)
+    stream = H3ProxyPtStream(
+        config,
+        topology,
+        selection_seed=int(config["validation"]["selection_seed"]),
+    )
+    ablation_mode = str(config["validation"].get("proxy_ablation", "correct")).strip().lower()
+    donor_stream = (
+        H3ProxyPtStream(
+            config,
+            topology,
+            selection_seed=int(config["validation"]["selection_seed"]) + 1,
+        )
+        if ablation_mode == "shuffled"
+        else None
+    )
     output_root = Path(str(config["runtime"]["output_dir"])).resolve() / "proxy-inference"
     noise_seed = int(config["validation"]["noise_seed"])
     inference_steps = int(config["validation"]["num_inference_steps"])
@@ -399,4 +438,4 @@ def run_proxy_inference(config: Mapping[str, Any]) -> int:
     return 0
 
 
-__all__ = ["run_proxy_inference"]
+__all__ = ["ProxyRuntime", "load_proxy_runtime", "run_proxy_inference"]

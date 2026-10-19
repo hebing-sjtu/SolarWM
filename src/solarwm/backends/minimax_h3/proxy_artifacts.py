@@ -21,12 +21,16 @@ from .geometry import PROXY_STAGE0P5_GEOMETRY, H3ProxyStage0p5Geometry, proxy_ge
 H3_PROXY_PREENCODE_VERSION = "h3.ref2va-proxy.124f.v1"
 H3_PROXY_DATASET_NAME = "h3_proxy_pt"
 # Given latent frames promised by each FastVideo CWM system prompt.
-CWM_GIVEN_FRAMES = {"w0": 1, "wn": 10, "w0_depth_semantic": 1, "w0_omni": 1}
+CWM_GIVEN_FRAMES = {"w0": 1, "wn": 10, "w0_depth_semantic": 1, "w0_omni": 1, "wn_omni": 10}
 _CWM_GIVEN_FRAMES = CWM_GIVEN_FRAMES
+# The role of a long take's later segments, which open on the previous segment's tail, for a
+# run whose documents use the key role.
+CWM_CONTINUATION_ROLES = {"w0": "wn", "w0_omni": "wn_omni"}
 # What `encode_proxy_samples.py --proxy-references` can cache, and the default single DUV video.
 PROXY_REFERENCE_KINDS = ("duv", "depth", "semantic", "style")
 LEGACY_PROXY_REFERENCES = ("duv",)
 OMNI_MIXED_ROLE = "w0_omni"
+OMNI_ROLES = (OMNI_MIXED_ROLE, "wn_omni")
 # Video references each role's system prompt names, in <Video N> order. Unlisted roles name one.
 CWM_ROLE_REFERENCES = {"w0_depth_semantic": ("depth", "semantic")}
 
@@ -73,7 +77,7 @@ def check_role_references(role: str, references: tuple[str, ...]) -> None:
     """Refuse a CWM role whose system prompt describes other videos than the cache carries."""
 
     expected = CWM_ROLE_REFERENCES.get(role)
-    if role == OMNI_MIXED_ROLE:
+    if role in OMNI_ROLES:
         if len(references) != 1 or references[0] not in PROXY_REFERENCE_KINDS:
             raise DataContractError(
                 f"CWM role {role!r} requires exactly one typed proxy video, got "
@@ -131,9 +135,9 @@ def h3_proxy_encoder_contract(
     variants = tuple(proxy_variants)
     references = tuple(proxy_references)
     if variants:
-        if role != OMNI_MIXED_ROLE:
+        if role not in OMNI_ROLES:
             raise DataContractError(
-                f"mixed proxy variants require CWM role {OMNI_MIXED_ROLE!r}, got {role!r}"
+                f"mixed proxy variants require a CWM role of {list(OMNI_ROLES)}, got {role!r}"
             )
         if references != ("proxy",):
             raise DataContractError("mixed proxy variants use one generic video reference")
@@ -239,6 +243,26 @@ class H3ProxyArtifactBatch:
         return (self.anchor_latents, self.oc_latents)
 
 
+def batch_given_frames(
+    data: Mapping[str, Any], batch: H3ProxyArtifactBatch, *, continuation: bool = False
+) -> int:
+    """The batch's given latents, once its role is the run's, or with ``continuation`` the
+    role of a long take's later segments."""
+
+    role = str(data["cwm_system"]).strip().lower()
+    allowed = {role}
+    if continuation and role in CWM_CONTINUATION_ROLES:
+        allowed.add(CWM_CONTINUATION_ROLES[role])
+    if batch.cwm_system not in allowed:
+        raise RuntimeError(
+            f"H3 proxy CWM role {batch.cwm_system!r} is not one of this run's {sorted(allowed)}"
+        )
+    given = int(batch.num_given_latent_frames)
+    if given != CWM_GIVEN_FRAMES[batch.cwm_system]:
+        raise RuntimeError("H3 proxy given-frame count differs from cached CWM role")
+    return given
+
+
 def oc_reference_from_data(data: Mapping[str, Any]) -> tuple[bool, float]:
     """``data.oc_reference`` and the training-only ``data.oc_drop_prob``."""
 
@@ -293,9 +317,11 @@ class H3ProxyPtStream:
         *,
         selection_seed: int | None = None,
         oc_dropout: bool = False,
+        continuation: bool = False,
     ) -> None:
         data = config["data"]
         self.topology = topology
+        self.continuation = bool(continuation)
         self.seed = int(data.get("seed", 42) if selection_seed is None else selection_seed)
         self.oc_reference, drop = oc_reference_from_data(data)
         # Validation and inference always show the sheet a sample carries.
@@ -462,9 +488,12 @@ class H3ProxyPtStream:
         if not isinstance(info, Mapping):
             raise DataContractError("H3 proxy info must be a mapping")
         role = str(info.get("cwm_system") or "").strip().lower()
-        if role != self.expected_role:
+        allowed = {self.expected_role}
+        if self.continuation and self.expected_role in CWM_CONTINUATION_ROLES:
+            allowed.add(CWM_CONTINUATION_ROLES[self.expected_role])
+        if role not in allowed:
             raise DataContractError(
-                f"H3 proxy sample {path} has cwm_system={role!r}, expected {self.expected_role!r}"
+                f"H3 proxy sample {path} has cwm_system={role!r}, expected one of {sorted(allowed)}"
             )
         qwen_fps = info.get("qwen_video_fps")
         if qwen_fps is not None and float(qwen_fps) != self.expected_qwen_fps:
@@ -526,6 +555,11 @@ class H3ProxyPtStream:
             **fields,
         )
 
+    def read(self, path: Path) -> H3ProxyArtifactBatch:
+        """One sample of this reader's contract, outside the shuffled stream."""
+
+        return self._read(Path(path))
+
     def next(self) -> H3ProxyArtifactBatch:
         if self.cursor >= len(self._owned):
             self.epoch += 1
@@ -571,15 +605,18 @@ class H3ProxyPtStream:
 
 
 __all__ = [
+    "CWM_CONTINUATION_ROLES",
     "CWM_GIVEN_FRAMES",
     "CWM_ROLE_REFERENCES",
     "H3_PROXY_DATASET_NAME",
     "H3_PROXY_PREENCODE_VERSION",
     "LEGACY_PROXY_REFERENCES",
     "OMNI_MIXED_ROLE",
+    "OMNI_ROLES",
     "PROXY_REFERENCE_KINDS",
     "H3ProxyArtifactBatch",
     "H3ProxyPtStream",
+    "batch_given_frames",
     "check_role_references",
     "h3_proxy_encoder_contract",
     "oc_reference_from_data",
