@@ -114,11 +114,14 @@ def build_ref2va_proxy_layout(
     align_proxy_reference_time: bool = False,
     patch_size: tuple[int, int, int] = (1, 2, 2),
     num_proxy_references: int = 1,
+    extra_image_sizes: tuple[tuple[int, int], ...] = (),
 ) -> H3PackedLayout:
-    """Build ``[text | anchor | proxy_1 .. proxy_N | target audio | target video]``.
+    """Build ``[text | anchor | image_2 .. | proxy_1 .. proxy_N | target audio | target video]``.
 
     Every proxy video shares one latent geometry. Each advances the reference clock by its own
     temporal span, which is how H3 orders ``<Video 1>``, ``<Video 2>``... in Ref2VA.
+    ``extra_image_sizes`` are further pictures (``<Picture 2>``...), such as a character
+    identity sheet, each one keyframe advancing the clock by one like the anchor.
     """
 
     tags = np.asarray(text_token_tags, dtype=np.int64)
@@ -132,9 +135,18 @@ def build_ref2va_proxy_layout(
         raise ValueError("Ref2VA reference latent grids must be positive")
     if int(num_proxy_references) < 1:
         raise ValueError("Ref2VA proxy layout needs at least one proxy video reference")
+    if any(min(int(h), int(w)) <= 0 for h, w in extra_image_sizes):
+        raise ValueError("Ref2VA extra picture latent grids must be positive")
 
     _, patch_h, patch_w = patch_size
     anchor_h, anchor_w = _padded(anchor_height, patch_h), _padded(anchor_width, patch_w)
+    images = (
+        H3ReferenceGeometry("image", 1, anchor_h, anchor_w),
+        *(
+            H3ReferenceGeometry("image", 1, _padded(h, patch_h), _padded(w, patch_w))
+            for h, w in extra_image_sizes
+        ),
+    )
     proxy_h, proxy_w = _padded(proxy_height, patch_h), _padded(proxy_width, patch_w)
     proxy_reference = H3ReferenceGeometry(
         "video",
@@ -143,14 +155,11 @@ def build_ref2va_proxy_layout(
         proxy_w,
         time_aligned=bool(align_proxy_reference_time),
     )
-    references = (
-        H3ReferenceGeometry("image", 1, anchor_h, anchor_w),
-        *((proxy_reference,) * int(num_proxy_references)),
-    )
+    references = (*images, *((proxy_reference,) * int(num_proxy_references)))
     target_rows_per_frame = (target_height // patch_h) * (target_width // patch_w)
-    reference_rows = (anchor_h // patch_h) * (anchor_w // patch_w) + int(
-        num_proxy_references
-    ) * proxy_frames * (proxy_h // patch_h) * (proxy_w // patch_w)
+    reference_rows = sum(
+        (image.latent_height // patch_h) * (image.latent_width // patch_w) for image in images
+    ) + int(num_proxy_references) * proxy_frames * (proxy_h // patch_h) * (proxy_w // patch_w)
     num_text = int(tags.size)
     num_audio_rows = int(num_audio_latents) * 2
     num_target_rows = int(target_frames) * target_rows_per_frame
@@ -271,8 +280,9 @@ def build_ref2va_stage1_layout(
     chunk_latent_frames: int = 5,
     window_chunks: int = 6,
     chunks: tuple[int, int] | None = None,
+    extra_image_sizes: tuple[tuple[int, int], ...] = (),
 ) -> H3PackedLayout:
-    """Build ``[text | anchor | proxy | audio | clean target | noisy target]`` for Stage1.
+    """Build ``[text | anchor | image_2 .. | proxy | audio | clean | noisy]`` for Stage1.
 
     Every position is the Stage0.5 Ref2VA document's for a ``proxy_frames``-latent proxy, so
     a Stage0.5 LoRA keeps its geometry; target positions continue past the cached length when
@@ -309,9 +319,13 @@ def build_ref2va_stage1_layout(
         num_audio_latents=num_audio_latents,
         align_proxy_reference_time=align_proxy_reference_time,
         num_proxy_references=num_proxy_references,
+        extra_image_sizes=extra_image_sizes,
     )
     num_text = int(full.text_indices.size)
-    anchor_rows = (_padded(anchor_height, 2) // 2) * (_padded(anchor_width, 2) // 2)
+    anchor_rows = sum(
+        (_padded(h, 2) // 2) * (_padded(w, 2) // 2)
+        for h, w in ((anchor_height, anchor_width), *extra_image_sizes)
+    )
     proxy_frame_rows = (_padded(proxy_height, 2) // 2) * (_padded(proxy_width, 2) // 2)
     target_frame_rows = int(full.rows_per_video_frame)
     proxy_stop_frame = min(stop_frame, proxy_frames)

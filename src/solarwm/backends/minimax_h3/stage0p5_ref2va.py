@@ -27,13 +27,31 @@ def _proxy_videos(proxy_latents: Any) -> Any:
     return proxy_latents.unsqueeze(0) if proxy_latents.ndim == 4 else proxy_latents
 
 
-def _condition_rows(anchor: Any, proxies: Any) -> Any:
-    """Patchified ``[anchor | proxy_1 | ... | proxy_R]`` reference rows."""
+def _images(anchor: Any) -> tuple[Any, ...]:
+    """``[1, 24, 1, h, w]`` reference pictures; a bare tensor is the anchor alone."""
+
+    return tuple(anchor) if isinstance(anchor, (tuple, list)) else (anchor,)
+
+
+def _picture_inputs(batch: H3ProxyArtifactBatch, device: Any) -> tuple[Any, ...]:
+    """The anchor and any OC sheet, batched and padded to the patch grid."""
 
     import torch
 
+    return tuple(
+        _pad_spatial(image.to(device, dtype=torch.float32, non_blocking=True).unsqueeze(0))
+        for image in batch.image_latents()
+    )
+
+
+def _condition_rows(anchor: Any, proxies: Any) -> Any:
+    """Patchified ``[anchor | picture_2 .. | proxy_1 | ... | proxy_R]`` reference rows."""
+
+    import torch
+
+    pictures = (patchify_video(image) for image in _images(anchor))
     videos = (patchify_video(proxies[index : index + 1]) for index in range(int(proxies.shape[0])))
-    return torch.cat((patchify_video(anchor), *videos), dim=1)
+    return torch.cat((*pictures, *videos), dim=1)
 
 
 class H3Ref2VAStage0p5Core:
@@ -54,12 +72,15 @@ class H3Ref2VAStage0p5Core:
 
         tags_cpu = tags.detach().cpu().long().numpy()
         proxy = _proxy_videos(proxy)
+        anchor, *extra = _images(anchor)
+        extra_sizes = tuple((int(image.shape[-2]), int(image.shape[-1])) for image in extra)
         dimensions = (
             int(anchor.shape[-2]),
             int(anchor.shape[-1]),
             int(proxy.shape[-2]),
             int(proxy.shape[-1]),
             int(proxy.shape[0]),
+            *extra_sizes,
         )
         key = hashlib.blake2s(
             tags_cpu.tobytes()
@@ -82,6 +103,7 @@ class H3Ref2VAStage0p5Core:
             num_audio_latents=207,
             align_proxy_reference_time=bool(self.config["data"]["align_proxy_reference_time"]),
             num_proxy_references=dimensions[4],
+            extra_image_sizes=extra_sizes,
         )
         layout = H3TorchLayout(
             source=source,
@@ -187,11 +209,7 @@ class H3Ref2VAStage0p5Core:
         clean = batch.target_latents.to(
             self.device, dtype=torch.float32, non_blocking=True
         ).unsqueeze(0)
-        anchor = _pad_spatial(
-            batch.anchor_latents.to(self.device, dtype=torch.float32, non_blocking=True).unsqueeze(
-                0
-            )
-        )
+        pictures = _picture_inputs(batch, self.device)
         proxy = _pad_spatial(
             _proxy_videos(
                 batch.proxy_latents.to(self.device, dtype=torch.float32, non_blocking=True)
@@ -201,10 +219,10 @@ class H3Ref2VAStage0p5Core:
             self.device, dtype=torch.bfloat16, non_blocking=True
         ).unsqueeze(0)
         tags = batch.text_token_tags.to(self.device, dtype=torch.long)
-        self._broadcast(clean, anchor, proxy, prompt, tags)
-        layout = self.layout(tags, anchor, proxy)
+        self._broadcast(clean, *pictures, proxy, prompt, tags)
+        layout = self.layout(tags, pictures, proxy)
 
-        condition_rows = _condition_rows(anchor, proxy)
+        condition_rows = _condition_rows(pictures, proxy)
         condition_noise = torch.randn(
             condition_rows.shape,
             generator=generator,
@@ -298,11 +316,7 @@ class H3Ref2VAStage0p5Core:
         clean = batch.target_latents.to(
             self.device, dtype=torch.float32, non_blocking=True
         ).unsqueeze(0)
-        anchor = _pad_spatial(
-            batch.anchor_latents.to(self.device, dtype=torch.float32, non_blocking=True).unsqueeze(
-                0
-            )
-        )
+        pictures = _picture_inputs(batch, self.device)
         proxy = _pad_spatial(
             _proxy_videos(
                 batch.proxy_latents.to(self.device, dtype=torch.float32, non_blocking=True)
@@ -312,10 +326,10 @@ class H3Ref2VAStage0p5Core:
             self.device, dtype=torch.bfloat16, non_blocking=True
         ).unsqueeze(0)
         tags = batch.text_token_tags.to(self.device, dtype=torch.long)
-        self._broadcast(clean, anchor, proxy, prompt, tags)
-        layout = self.layout(tags, anchor, proxy)
+        self._broadcast(clean, *pictures, proxy, prompt, tags)
+        layout = self.layout(tags, pictures, proxy)
 
-        condition = _condition_rows(anchor, proxy)
+        condition = _condition_rows(pictures, proxy)
         condition_noise = torch.randn(
             condition.shape,
             generator=generator,

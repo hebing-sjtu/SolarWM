@@ -117,6 +117,7 @@ def h3_proxy_encoder_contract(
     proxy_variants: tuple[str, ...] = (),
     proxy_fit: str | None = None,
     proxy_code_resize: str | None = None,
+    oc_reference: bool = False,
 ) -> EncoderContract:
     """Describe the cached Ref2VA semantics without claiming native H3 compatibility.
 
@@ -168,6 +169,16 @@ def h3_proxy_encoder_contract(
             + " plus CWM user caption",
             "proxy_references": list(references),
         }
+    if oc_reference:
+        order = reference_extras["reference_order"]
+        reference_extras = {
+            **reference_extras,
+            "reference_order": [order[0], "picture_oc_optional", *order[1:]],
+            "qwen_presentation": reference_extras["qwen_presentation"].replace(
+                "<Picture 1> then", "<Picture 1>, an optional <Picture 2> OC sheet, then"
+            ),
+            "oc_reference": True,
+        }
     return EncoderContract(
         schema="solarwm.encoder.v1",
         family="minimax_h3",
@@ -215,6 +226,32 @@ class H3ProxyArtifactBatch:
     audio_latents: Any = None
     proxy_references: tuple[str, ...] = LEGACY_PROXY_REFERENCES
     dataset_source: str = "fastvideo_proxy_pt"
+    # ``<Picture 2>`` identity sheet, and the Qwen rows of the same document without it.
+    oc_latents: Any = None
+    prompt_embeds_no_oc: Any = None
+    text_token_tags_no_oc: Any = None
+
+    def image_latents(self) -> tuple[Any, ...]:
+        """Reference pictures in ``<Picture N>`` order: the anchor, then the OC sheet if any."""
+
+        return (self.anchor_latents,) if self.oc_latents is None else (
+            self.anchor_latents,
+            self.oc_latents,
+        )
+
+
+def oc_reference_from_data(data: Mapping[str, Any]) -> tuple[bool, float]:
+    """``data.oc_reference`` and the training-only ``data.oc_drop_prob``."""
+
+    enabled = data.get("oc_reference", False)
+    if not isinstance(enabled, bool):
+        raise DataContractError("data.oc_reference must be a boolean")
+    drop = data.get("oc_drop_prob", 0.0)
+    if isinstance(drop, bool) or not isinstance(drop, (int, float)) or not 0.0 <= drop < 1.0:
+        raise DataContractError("data.oc_drop_prob must be a number in [0, 1)")
+    if drop and not enabled:
+        raise DataContractError("data.oc_drop_prob requires data.oc_reference=true")
+    return enabled, float(drop)
 
 
 def _sample_paths(data_path: str) -> tuple[Path, ...]:
@@ -256,10 +293,14 @@ class H3ProxyPtStream:
         topology: Topology,
         *,
         selection_seed: int | None = None,
+        oc_dropout: bool = False,
     ) -> None:
         data = config["data"]
         self.topology = topology
         self.seed = int(data.get("seed", 42) if selection_seed is None else selection_seed)
+        self.oc_reference, drop = oc_reference_from_data(data)
+        # Validation and inference always show the sheet a sample carries.
+        self.oc_drop_prob = drop if oc_dropout else 0.0
         self.paths = _sample_paths(str(data["data_path"]))
         self.expected_role = str(data["cwm_system"]).strip().lower()
         self.expected_qwen_fps = float(data["qwen_video_fps"])
@@ -281,6 +322,7 @@ class H3ProxyPtStream:
             proxy_variants=self.variants,
             proxy_fit=self.expected_fit or None,
             proxy_code_resize=self.expected_code_resize or None,
+            oc_reference=self.oc_reference,
         ).as_dict()
         self.epoch = 0
         self.cursor = 0
@@ -323,7 +365,49 @@ class H3ProxyPtStream:
         ):
             raise DataContractError(f"H3 proxy {key} shape {shape} differs from {expected}")
 
-    def _read(self, path: Path) -> H3ProxyArtifactBatch:
+    def _oc_fields(self, payload: Mapping[str, Any], path: Path, *, drop: bool) -> dict[str, Any]:
+        """The OC latent and both Qwen row sets, resolved to what this sample presents.
+
+        A cache row with a sheet stores the document's Qwen rows with ``<Picture 2>`` as
+        ``text_embedding`` and without it as ``text_embedding_no_oc``. Runs without
+        ``oc_reference`` read the latter, so an OC cache serves them exactly as the cache it
+        was refreshed from.
+        """
+
+        import torch
+
+        if "oc_latent" not in payload:
+            return {}
+        missing = sorted({"text_embedding_no_oc", "text_token_tags_no_oc"} - set(payload))
+        if missing:
+            raise DataContractError(f"H3 proxy sample {path} has oc_latent but misses {missing}")
+        oc = self._float_tensor(payload["oc_latent"], "oc_latent")
+        self._shape(oc, (24, 1, None, None), "oc_latent")
+        if oc.shape[-2] < 2 or oc.shape[-1] < 2:
+            raise DataContractError("H3 proxy OC latent grid is empty")
+        prompt = self._float_tensor(payload["text_embedding_no_oc"], "text_embedding_no_oc")
+        tags = payload["text_token_tags_no_oc"]
+        if not isinstance(tags, torch.Tensor) or tags.dtype != torch.int64:
+            raise DataContractError("H3 proxy text_token_tags_no_oc must be an int64 tensor")
+        self._shape(prompt, (None, 5120), "text_embedding_no_oc")
+        self._shape(tags, (None,), "text_token_tags_no_oc")
+        if int(prompt.shape[0]) != int(tags.shape[0]):
+            raise DataContractError("H3 proxy no-OC prompt rows and token tags differ")
+        tags = tags.detach().cpu().contiguous()
+        if not self.oc_reference or drop:
+            return {"prompt_embeds": prompt, "text_token_tags": tags}
+        return {"oc_latents": oc, "prompt_embeds_no_oc": prompt, "text_token_tags_no_oc": tags}
+
+    def _drops_oc(self, path: Path) -> bool:
+        """A per-visit coin, identical on every rank that reads this visit (SP peers do)."""
+
+        if not self.oc_drop_prob:
+            return False
+        key = f"{self.seed}\0{self.epoch}\0{self.cursor}\0{path.name}".encode()
+        draw = int.from_bytes(hashlib.blake2s(key, digest_size=8).digest(), "big") / 2.0**64
+        return draw < self.oc_drop_prob
+
+    def _read(self, path: Path, *, drop_oc: bool = False) -> H3ProxyArtifactBatch:
         import torch
 
         try:
@@ -424,6 +508,11 @@ class H3ProxyPtStream:
         identity = hashlib.blake2s(
             f"{path.resolve()}\0{path.stat().st_size}".encode(), digest_size=16
         ).hexdigest()
+        fields: dict[str, Any] = {
+            "prompt_embeds": prompt,
+            "text_token_tags": tags,
+            **self._oc_fields(payload, path, drop=drop_oc),
+        }
         return H3ProxyArtifactBatch(
             sample_id=path.stem,
             start_frame=0,
@@ -431,12 +520,11 @@ class H3ProxyPtStream:
             target_latents=target,
             proxy_latents=proxy,
             anchor_latents=anchor,
-            prompt_embeds=prompt,
-            text_token_tags=tags,
             cwm_system=role,
             num_given_latent_frames=_CWM_GIVEN_FRAMES[role],
             audio_latents=audio,
             proxy_references=sample_references,
+            **fields,
         )
 
     def next(self) -> H3ProxyArtifactBatch:
@@ -445,8 +533,9 @@ class H3ProxyPtStream:
             self.cursor = 0
             self._reset_epoch()
         path = self._owned[self.cursor]
+        drop_oc = self._drops_oc(path)
         self.cursor += 1
-        return self._read(path)
+        return self._read(path, drop_oc=drop_oc)
 
     def state_dict(self) -> dict[str, Any]:
         return {
@@ -494,6 +583,7 @@ __all__ = [
     "H3ProxyPtStream",
     "check_role_references",
     "h3_proxy_encoder_contract",
+    "oc_reference_from_data",
     "proxy_latent_shape",
     "proxy_references_from_data",
     "proxy_variants_from_data",

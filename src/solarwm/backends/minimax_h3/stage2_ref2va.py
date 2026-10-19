@@ -169,7 +169,7 @@ def prefill_spans(layout: Any) -> tuple[int, tuple[tuple[tuple[int, int], ...], 
 class H3Ref2VASGFInputs:
     prompt: Any
     tags: Any
-    anchor: Any
+    anchor: Any  # every reference picture, the anchor first
     proxy: Any
     audio_clean: Any
     audio: Any
@@ -212,9 +212,12 @@ class H3Ref2VASGFCore(H3Ref2VAStage1Core):
     ) -> H3Ref2VASGFInputs:
         import torch
 
-        clean, anchor, proxy, prompt, tags, given = self._inputs(batch)
+        clean, pictures, proxy, prompt, tags, given = self._inputs(batch)
         aug = float(self.train["keyframe_noise_augmentation"])
-        anchor = scale_noise(anchor, self.random_like(anchor, generator=generator), aug)
+        anchor = tuple(
+            scale_noise(image, self.random_like(image, generator=generator), aug)
+            for image in pictures
+        )
         proxy = scale_noise(proxy, self.random_like(proxy, generator=generator), aug)
         given_value = None
         if given:

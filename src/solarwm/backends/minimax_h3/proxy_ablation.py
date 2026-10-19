@@ -11,11 +11,11 @@ from solarwm.errors import BackendContractError
 from .layout import VIDEO_TAG
 from .proxy_artifacts import H3ProxyArtifactBatch
 
-PROXY_ABLATION_MODES = frozenset({"correct", "shuffled", "static"})
+PROXY_ABLATION_MODES = frozenset({"correct", "shuffled", "static", "no_oc"})
 
 
 def _vision_runs(tags: Any) -> tuple[slice, ...]:
-    """Return contiguous Qwen vision-token runs; picture is first, video blocks follow.
+    """Return contiguous Qwen vision-token runs; pictures are first, video blocks follow.
 
     FastVideo tags Qwen's vision placeholders ``VIDEO_TAG`` and every text token ``TEXT_TAG``.
     """
@@ -65,9 +65,11 @@ def _replace_proxy_prompt_rows(
     source_tags: Any,
     static: bool,
     references: int = 1,
+    pictures: int = 1,
+    source_pictures: int = 1,
 ) -> Any:
-    destination_runs = _vision_runs(tags)[1:]
-    source_runs = _vision_runs(source_tags)[1:]
+    destination_runs = _vision_runs(tags)[pictures:]
+    source_runs = _vision_runs(source_tags)[source_pictures:]
     if len(destination_runs) != len(source_runs):
         raise BackendContractError("H3 proxy Qwen video block counts differ during ablation")
 
@@ -116,8 +118,25 @@ def apply_proxy_ablation(
         if donor is not None:
             raise BackendContractError("correct proxy ablation must not receive a donor")
         return batch
+    if selected == "no_oc":
+        if donor is not None:
+            raise BackendContractError("no_oc ablation must not receive a donor")
+        if batch.oc_latents is None:
+            return batch
+        return replace(
+            batch,
+            plan_fingerprint=hashlib.blake2s(
+                f"{batch.plan_fingerprint}\0proxy-ablation=no_oc".encode()
+            ).hexdigest(),
+            oc_latents=None,
+            prompt_embeds=batch.prompt_embeds_no_oc,
+            text_token_tags=batch.text_token_tags_no_oc,
+            prompt_embeds_no_oc=None,
+            text_token_tags_no_oc=None,
+        )
 
     references = _reference_count(batch.proxy_latents)
+    pictures = len(batch.image_latents())
     if selected == "shuffled":
         if donor is None or donor.sample_id == batch.sample_id:
             raise BackendContractError("shuffled proxy ablation requires a different donor sample")
@@ -137,6 +156,8 @@ def apply_proxy_ablation(
             source_tags=donor.text_token_tags,
             static=False,
             references=references,
+            pictures=pictures,
+            source_pictures=len(donor.image_latents()),
         )
         donor_identity = donor.plan_fingerprint
     else:
@@ -148,6 +169,8 @@ def apply_proxy_ablation(
             source_tags=batch.text_token_tags,
             static=True,
             references=references,
+            pictures=pictures,
+            source_pictures=pictures,
         )
         donor_identity = "first-proxy-frame"
 

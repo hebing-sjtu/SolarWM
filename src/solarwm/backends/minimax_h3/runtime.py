@@ -162,7 +162,7 @@ def _reader(
             raise BackendContractError(
                 "H3 proxy validation is disabled; set validation intervals to zero"
             )
-        return H3ProxyPtStream(config, topology)
+        return H3ProxyPtStream(config, topology, oc_dropout=True)
     transport = data["transport"]
     common = {
         "root": str(transport["root"]),

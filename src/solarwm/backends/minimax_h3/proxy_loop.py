@@ -36,7 +36,7 @@ WANDB_KEY_FILE = Path("/data/binghe/.secrets/wandb_api_key")
 NCCL_ENV_SCRIPT = Path("/usr/local/gib/scripts/set_nccl_env.sh")
 NCCL_LIBRARY_DIR = "/usr/local/gib/lib64"
 MODEL_SHARDS = Path("/data/models/MiniMax-H3/transformer_ref")
-ABLATIONS = ("correct", "static", "shuffled")
+ABLATIONS = ("correct", "static", "shuffled", "no_oc")
 # Eval outputs must not inherit training-only or launcher-owned sections of a run config.
 _RUN_SECTIONS_FOR_EVAL = ("model", "data")
 

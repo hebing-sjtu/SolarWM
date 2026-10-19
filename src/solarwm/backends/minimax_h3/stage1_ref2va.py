@@ -18,7 +18,14 @@ from .distributed import get_dp_group, get_dp_rank, get_dp_world_size, is_sequen
 from .layout import patchify_video, unpatchify_video
 from .proxy_artifacts import H3ProxyArtifactBatch
 from .ref2va_layout import build_ref2va_stage1_layout
-from .stage0p5_ref2va import H3Ref2VAStage0p5Core, _condition_rows, _pad_spatial, _proxy_videos
+from .stage0p5_ref2va import (
+    H3Ref2VAStage0p5Core,
+    _condition_rows,
+    _images,
+    _pad_spatial,
+    _picture_inputs,
+    _proxy_videos,
+)
 from .torch_flow import make_shifted_schedule, scale_noise
 from .torch_mask import build_ref2va_stage1_block_mask
 
@@ -94,9 +101,12 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
     ) -> tuple[Any, Any]:
         """The layout and W6 ``BlockMask`` of ``chunks`` on a ``frames``-latent timeline."""
 
+        anchor, *extra = _images(anchor)
+        extra_sizes = tuple((int(image.shape[-2]), int(image.shape[-1])) for image in extra)
         key = (
             tags.detach().cpu().long().numpy().tobytes(),
             tuple(int(value) for value in anchor.shape[-2:]),
+            extra_sizes,
             tuple(int(value) for value in proxy.shape[-3:]),
             int(proxy.shape[0]),
             int(frames),
@@ -122,6 +132,7 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
             chunk_latent_frames=CHUNK_LATENTS,
             window_chunks=WINDOW_CHUNKS,
             chunks=chunks,
+            extra_image_sizes=extra_sizes,
         ).to(self.device)
         cached = (
             layout,
@@ -151,11 +162,7 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
         clean = batch.target_latents.to(
             self.device, dtype=torch.float32, non_blocking=True
         ).unsqueeze(0)
-        anchor = _pad_spatial(
-            batch.anchor_latents.to(self.device, dtype=torch.float32, non_blocking=True).unsqueeze(
-                0
-            )
-        )
+        pictures = _picture_inputs(batch, self.device)
         proxy = _pad_spatial(
             _proxy_videos(
                 batch.proxy_latents.to(self.device, dtype=torch.float32, non_blocking=True)
@@ -170,8 +177,8 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
             self.device, dtype=torch.bfloat16, non_blocking=True
         ).unsqueeze(0)
         tags = batch.text_token_tags.to(self.device, dtype=torch.long)
-        self._broadcast(clean, anchor, proxy, prompt, tags)
-        return clean, anchor, proxy, prompt, tags, given
+        self._broadcast(clean, *pictures, proxy, prompt, tags)
+        return clean, pictures, proxy, prompt, tags, given
 
     def _model(
         self,
@@ -213,17 +220,17 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
                 value.shape, generator=generator, device=self.device, dtype=torch.float32
             )
 
-        clean, anchor, proxy, prompt, tags, given = self._inputs(batch)
+        clean, pictures, proxy, prompt, tags, given = self._inputs(batch)
         clean = clean[:, :, : self.train_frames].contiguous()
         layout, mask = self.window(
             tags,
-            anchor,
+            pictures,
             proxy,
             frames=self.train_frames,
             chunks=(0, self.train_frames // CHUNK_LATENTS),
         )
         aug = float(self.train["keyframe_noise_augmentation"])
-        condition = _condition_rows(anchor, proxy[:, :, : self.train_frames])
+        condition = _condition_rows(pictures, proxy[:, :, : self.train_frames])
         condition_noise = noise_like(condition)
         audio_clean = self._audio_rows(batch)
         audio_noise = noise_like(audio_clean)
@@ -312,9 +319,11 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
             self._broadcast(noise)
             return noise
 
-        clean, anchor, proxy, prompt, tags, given = self._inputs(batch)
+        clean, pictures, proxy, prompt, tags, given = self._inputs(batch)
         aug = float(self.train["keyframe_noise_augmentation"])
-        anchor_rows = patchify_video(scale_noise(anchor, noise_like(anchor), aug))
+        anchor_rows = torch.cat(
+            [patchify_video(scale_noise(image, noise_like(image), aug)) for image in pictures], dim=1
+        )
         proxy = scale_noise(proxy, noise_like(proxy), aug)
         audio_clean = self._audio_rows(batch)
         audio_noise = noise_like(audio_clean)
@@ -338,7 +347,7 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
             for chunk in range(self.rollout_chunks):
                 first = max(0, chunk - (WINDOW_CHUNKS - 1))
                 layout, mask = self.window(
-                    tags, anchor, proxy, frames=frames, chunks=(first, chunk + 1)
+                    tags, pictures, proxy, frames=frames, chunks=(first, chunk + 1)
                 )
                 start, stop = first * CHUNK_LATENTS, (chunk + 1) * CHUNK_LATENTS
                 condition = torch.cat(

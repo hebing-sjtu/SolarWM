@@ -18,6 +18,7 @@ from .proxy_artifacts import (
     H3_PROXY_PREENCODE_VERSION,
     OMNI_MIXED_ROLE,
     check_role_references,
+    oc_reference_from_data,
     proxy_references_from_data,
     proxy_variants_from_data,
 )
@@ -240,6 +241,7 @@ def _validate_data(data: Mapping[str, Any], *, action: str, stage: str = "stage0
                         "data.cwm_system='w0_omni' requires data.proxy_variants"
                     )
                 check_role_references(cwm_system, proxy_references_from_data(data))
+            oc_reference_from_data(data)
         except DataContractError as exc:
             raise ConfigurationError(str(exc)) from exc
         data_path = _nonempty_path(data, "data_path", "data")
@@ -504,9 +506,9 @@ def _validate_validation(
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise ConfigurationError(f"validation.{name} must be a non-negative integer")
             proxy_ablation = str(validation.get("proxy_ablation", "correct")).strip().lower()
-            if proxy_ablation not in {"correct", "shuffled", "static"}:
+            if proxy_ablation not in {"correct", "shuffled", "static", "no_oc"}:
                 raise ConfigurationError(
-                    "validation.proxy_ablation must be correct, shuffled, or static"
+                    "validation.proxy_ablation must be correct, shuffled, static, or no_oc"
                 )
             for key, expected in (
                 ("pixel_frames", 124),
