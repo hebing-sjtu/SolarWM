@@ -92,6 +92,7 @@ td .d { display: block; font-size: 11px; }
 .card .steps { display: flex; flex-wrap: wrap; gap: 4px; }
 .card .steps button { font-family: ui-monospace, Menlo, monospace; font-size: 12px; padding: 1px 7px; }
 .card .steps button.top { border-color: var(--good); color: var(--good); }
+.card .steps button.top.on { color: #fff; box-shadow: inset 0 0 0 2px var(--good); }
 section.stage h2 { font-size: 14px; margin: 16px 0 8px; }
 </style>
 </head>
@@ -612,7 +613,9 @@ function renderNotes(root) {
     ${METRICS[state.metric].name}（同阶段 correct 任务共同评过的样本上的均值，绿框为该实验最佳）。点击 step 加入/移出任务列，点“看视频”跳到视频对比。</div>`);
   for (const [key, name, blurb] of stages) {
     const tasks = DATA.tasks.filter((t) => t.stage === key);
-    if (!tasks.length) continue;
+    const evaluated = new Set(tasks.map((t) => t.run));
+    const waiting = Object.entries(DATA.experiments || {}).filter(([run, e]) => e.stage === key && !evaluated.has(run));
+    if (!tasks.length && !waiting.length) continue;
     const scored = tasks.filter((t) => t.ablation === "correct");
     const ids = commonIds(scored, sampleIds());
     const score = (t) => mean(ids.map((sid) => value(t, sid)));
@@ -654,6 +657,14 @@ function renderNotes(root) {
         state.stage = key; state.cols = correct.map((t) => t.id); state.ref = state.cols[0] || ""; state.view = "compare"; update();
       };
       steps.append(go);
+      cards.append(card);
+    }
+    for (const [run, e] of waiting) {
+      const card = document.createElement("div"); card.className = "card";
+      card.innerHTML = `<h4>${esc(e.label || run)} <span class="tag stage">${esc(key)}</span>
+        <span class="dim" style="font-weight:400;font-size:11px">${esc(run)}</span></h4>
+        <p>${e.note ? esc(e.note) : `<span class="dim">（还没有写设定说明）</span>`}</p>
+        <div class="dim">尚无评测结果（训练中或排队评测）</div>`;
       cards.append(card);
     }
     root.append(section);
