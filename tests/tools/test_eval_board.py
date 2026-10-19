@@ -40,8 +40,11 @@ def video(path: Path, colour: str) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def fake_task(root: Path, task: str, samples: dict[str, str], *, weight_source="live"):
+def fake_task(root: Path, task: str, samples: dict[str, str], *, weight_source="live", config=None):
     task_dir = root / task
+    if config is not None:
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "resolved-config.json").write_text(json.dumps({"config": config}))
     for slot, (sample_id, colour) in enumerate(samples.items()):
         name = f"slot-{slot:06d}"
         slot_dir = task_dir / "proxy-inference" / f"wave-{slot:03d}" / "dp-rank-00000" / name
@@ -119,6 +122,75 @@ def test_export_dedupes_media_scores_tasks_and_reruns_without_encoding(tmp_path)
     stamps = {p.name: p.stat().st_mtime_ns for p in (out / "media").iterdir()}
     assert export.main(argv) == 0
     assert {p.name: p.stat().st_mtime_ns for p in (out / "media").iterdir()} == stamps
+
+
+def stage_config(stage, steps, data="heldout32"):
+    return {
+        "train": {"stage": stage},
+        "data": {"data_path": f"/cache/{data}", "align_proxy_reference_time": False},
+        "validation": {"num_inference_steps": steps, "sample_count": 2, "noise_seed": 7},
+    }
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_export_reads_stage_protocol_ema_roots_and_experiment_notes(tmp_path):
+    export = load("export")
+    live, ema = tmp_path / "loops", tmp_path / "loops-ema"
+    samples = {"s1": "red"}
+    fake_task(live, "loop/bd/step-000300/correct", samples, config=stage_config("stage0p5", 30))
+    fake_task(
+        live,
+        "loop/bd-desc/step-000300/correct",
+        samples,
+        config=stage_config("stage0p5", 30, "heldout32_desc"),
+    )
+    fake_task(live, "loop/dmd/step-000500/correct", samples, config=stage_config("stage2", 4))
+    fake_task(
+        ema,
+        "loop/dmd/step-000500/correct",
+        samples,
+        weight_source="ema",
+        config=stage_config("stage2", 4),
+    )
+    notes = tmp_path / "runs.json"
+    notes.write_text(
+        json.dumps({"runs": {"dmd": {"label": "DMD run", "stage": "DMD", "note": "Two sentences."}}})
+    )
+    heldout = tmp_path / "heldout.jsonl"
+    heldout.write_text(json.dumps({"name": "s1", "prompt": "", "proxy_modality": "duv"}) + "\n")
+    out = tmp_path / "board"
+    argv = ["--loops-root", str(live), "--loops-root", str(ema), "--loop", "loop"]
+    argv += ["--heldout", str(heldout), "--out", str(out), "--experiments", str(notes)]
+
+    assert export.main(argv) == 0
+    index = json.loads((out / "index.json").read_text())
+    tasks = {t["id"]: t for t in index["tasks"]}
+    assert sorted(tasks) == [
+        "loop/bd-desc/step-000300/correct",
+        "loop/bd/step-000300/correct",
+        "loop/dmd/step-000500/correct",
+        "loop/dmd/step-000500/correct@ema",
+    ]
+    bd = tasks["loop/bd/step-000300/correct"]
+    assert bd["stage"] == "BD"
+    assert bd["protocol"] == {
+        "ablation": "correct",
+        "weights": "live",
+        "eval_data": "heldout32",
+        "steps": 30,
+        "sample_count": 2,
+        "noise_seed": 7,
+        "aligned": False,
+    }
+    assert tasks["loop/bd-desc/step-000300/correct"]["protocol"]["eval_data"] == "heldout32_desc"
+    assert tasks["loop/dmd/step-000500/correct"]["label"] == "DMD run · step 500"
+    assert tasks["loop/dmd/step-000500/correct@ema"]["label"] == "DMD run · step 500 · ema"
+    assert {t["stage"] for t in tasks.values() if t["run"] == "dmd"} == {"DMD"}
+    assert index["experiments"]["dmd"] == {"label": "DMD run", "stage": "DMD", "note": "Two sentences."}
+
+    notes.write_text(json.dumps({"runs": {"dmd": {"stage": "Stage2"}}}))
+    with pytest.raises(SystemExit):
+        export.main(argv)
 
 
 def test_report_pairs_deltas_per_group_and_lists_tasks_not_evaluated_yet(tmp_path):

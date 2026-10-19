@@ -82,12 +82,25 @@ td .d { display: block; font-size: 11px; }
 #modal .cells { flex: 1; justify-content: center; align-items: flex-start; }
 #modal .cell { width: min(48vw, 1280px); }
 .note { color: var(--dim); font-size: 12px; margin: 6px 0 12px; }
+.group .why { font-weight: 400; font-size: 11px; color: var(--dim); padding: 0 8px 4px; line-height: 1.4; }
+.tag.proto { color: #f0b72f; border-color: #5a4a1a; }
+.tag.stage { color: #7ee787; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 10px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.card h4 { margin: 0 0 4px; font-size: 14px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.card p { margin: 4px 0 8px; line-height: 1.55; }
+.card .steps { display: flex; flex-wrap: wrap; gap: 4px; }
+.card .steps button { font-family: ui-monospace, Menlo, monospace; font-size: 12px; padding: 1px 7px; }
+.card .steps button.top { border-color: var(--good); color: var(--good); }
+section.stage h2 { font-size: 14px; margin: 16px 0 8px; }
 </style>
 </head>
 <body>
 <header>
   <h1>H3 proxy 评测对比台</h1>
+  <nav class="tabs" id="stages" title="只看一个训练阶段：任务列、预设、汇总表都限定在该阶段内"></nav>
   <nav class="tabs" id="tabs">
+    <button data-view="notes">实验说明</button>
     <button data-view="compare">视频对比</button>
     <button data-view="table">指标汇总</button>
     <button data-view="heat">逐样本指标</button>
@@ -108,6 +121,9 @@ td .d { display: block; font-size: 11px; }
     <h3>固定列</h3>
     <label><input type="checkbox" id="show-target"> 真值视频 (target)</label>
     <label><input type="checkbox" id="show-proxy"> 参考视频 (proxy，按 ablation)</label>
+    <h3>公平对比</h3>
+    <label title="均值只统计所有行都评过的样本，避免样本集不同带来的偏差"><input type="checkbox" id="common"> 只用共同样本求均值</label>
+    <label title="static 消融把参考视频换成首帧静止画面，用来检验模型是否真的在跟随参考"><input type="checkbox" id="show-static"> 汇总表包含 static 消融</label>
     <h3>样本筛选</h3>
     <div class="chips" id="f-mod"></div>
     <div class="chips" id="f-kind"></div>
@@ -138,11 +154,17 @@ const KINDS = ["color", "high"];
 const KIND_HELP = { color: "目标为彩色 proxy 渲染", high: "目标为高保真游戏画面" };
 const ABL_NAME = { correct: "correct", static: "static（参考只用首帧）" };
 const BASE_GROUP = "base";
+const STAGES = [
+  ["BD", "BD · Stage0.5", "双向 flow matching：整段 124 帧一起去噪（30 步），后两阶段的老师和初始化来源。"],
+  ["AR", "AR · Stage1", "因果 AnyFlow：每 5 个 latent 一块、6 块滑窗，每块 4 步；从 BD 初始化。"],
+  ["DMD", "DMD · Stage2", "SGF 自蒸馏：学生是 AR 模型，老师和 critic 是 BD 模型，每块 4 步。"],
+  ["all", "全部", "所有阶段混在一起。不同阶段的采样方式不同，数字只作参考。"],
+];
 
 let DATA = null, TASKS = new Map(), ORDER = new Map();
 const state = {
-  view: "compare", cols: [], metric: "psnr_late", ref: "", mod: new Set(), kind: new Set(),
-  q: "", sort: "default", target: true, proxy: true, width: 360, focus: "",
+  view: "notes", stage: "BD", cols: [], metric: "psnr_late", ref: "", mod: new Set(), kind: new Set(),
+  q: "", sort: "default", target: true, proxy: true, width: 360, focus: "", common: true, statics: false,
 };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -155,6 +177,9 @@ const signed = (v, d) => v == null ? "" : (v >= 0 ? "+" : "") + fmt(v, d);
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
   if (p.has("v")) state.view = p.get("v");
+  if (p.has("st")) state.stage = p.get("st");
+  if (p.has("cm")) state.common = p.get("cm") === "1";
+  if (p.has("sa")) state.statics = p.get("sa") === "1";
   if (p.has("c")) state.cols = p.get("c").split(",").filter(Boolean);
   if (p.has("m") && METRICS[p.get("m")]) state.metric = p.get("m");
   if (p.has("r")) state.ref = p.get("r");
@@ -169,7 +194,8 @@ function readHash() {
 }
 function writeHash() {
   const p = new URLSearchParams();
-  p.set("v", state.view); p.set("c", state.cols.join(",")); p.set("m", state.metric);
+  p.set("v", state.view); p.set("st", state.stage); p.set("c", state.cols.join(",")); p.set("m", state.metric);
+  p.set("cm", state.common ? "1" : "0"); p.set("sa", state.statics ? "1" : "0");
   if (state.ref) p.set("r", state.ref);
   if (state.mod.size) p.set("mod", [...state.mod].join(","));
   if (state.kind.size) p.set("kind", [...state.kind].join(","));
@@ -181,9 +207,36 @@ function writeHash() {
 
 // ---------- data helpers ----------
 const groupOf = (t) => t.step === 0 ? BASE_GROUP : t.loop + "/" + t.run;
+const inStage = (t) => state.stage === "all" || t.stage === state.stage;
+const stageTasks = () => DATA.tasks.filter(inStage);
+const noteOf = (t) => ((DATA.experiments || {})[t.run] || {}).note || "";
+function majority(tasks, key) {
+  const count = new Map();
+  for (const t of tasks) { const v = (t.protocol || {})[key]; count.set(v, (count.get(v) || 0) + 1); }
+  return [...count].sort((a, b) => b[1] - a[1])[0]?.[0];
+}
+// What sets a task apart from the usual protocol of its stage: the reasons its numbers are not
+// directly comparable with the rest of that stage.
+function protocolTags(t) {
+  const peers = DATA.tasks.filter((x) => x.stage === t.stage), p = t.protocol || {}, tags = [];
+  if (t.weights === "base") tags.push("原始模型（无 LoRA）");
+  if (t.weights === "ema") tags.push("EMA 权重");
+  if (p.ablation && p.ablation !== "correct") tags.push(p.ablation + " 消融");
+  if (p.eval_data && p.eval_data !== majority(peers, "eval_data")) tags.push("评测缓存 " + p.eval_data.replace(/^gta_record_0930_omni_704p_ref640_?/, "") );
+  if (p.steps != null && p.steps !== majority(peers, "steps")) tags.push(p.steps + " 步采样");
+  if (p.aligned) tags.push("时间对齐 RoPE");
+  return tags;
+}
+function tableTasks() {
+  return stageTasks().filter((t) => state.statics || t.ablation === "correct");
+}
+// Sample ids every given task has a value for, under the current filters.
+function commonIds(tasks, ids) {
+  return ids.filter((sid) => tasks.every((t) => value(t, sid) != null));
+}
 function selected() {
-  return state.cols.filter((id) => TASKS.has(id)).sort((a, b) => ORDER.get(a) - ORDER.get(b))
-    .map((id) => TASKS.get(id));
+  return state.cols.filter((id) => TASKS.has(id) && inStage(TASKS.get(id)))
+    .sort((a, b) => ORDER.get(a) - ORDER.get(b)).map((id) => TASKS.get(id));
 }
 function value(task, sid) {
   const item = task && task.items[sid];
@@ -223,20 +276,43 @@ function finals() {
   }
   return last;
 }
-function pick(pred) { return DATA.tasks.filter(pred).map((t) => t.id); }
+function pick(pred) { return stageTasks().filter(pred).map((t) => t.id); }
+// Per run, the live correct step with the best mean over the samples every candidate shares.
+function bests() {
+  const live = stageTasks().filter((t) => t.step > 0 && t.ablation === "correct" && t.weights === "live");
+  const ids = commonIds(live, sampleIds());
+  const best = new Map();
+  for (const t of live) {
+    const m = mean(ids.map((sid) => value(t, sid)));
+    const key = t.loop + "/" + t.run, prev = best.get(key);
+    if (m != null && (!prev || m > prev.m)) best.set(key, { id: t.id, m });
+  }
+  return best;
+}
 
 function presets() {
-  const last = finals();
+  const last = finals(), best = bests(), name = (STAGES.find(([k]) => k === state.stage) || [])[0] || "";
+  const prefix = state.stage === "all" ? "" : name + "：";
   const isFinal = (t) => t.step > 0 && last.get(t.loop + "/" + t.run) === t.step;
+  const live = (t) => t.ablation === "correct" && t.weights !== "ema";
   const list = [
-    ["原始模型 + 各实验最终步（correct）", () => pick((t) => t.ablation === "correct" && (t.step === 0 || isFinal(t)))],
-    ["各实验最终步（correct）", () => pick((t) => t.ablation === "correct" && isFinal(t))],
-    ["correct vs static（原始模型 + 最终步）", () => pick((t) => t.step === 0 || isFinal(t))],
+    [prefix + "各实验最佳步（correct · live）", () => [...best.values()].map((b) => b.id)],
+    [prefix + "各实验最终步（correct · live）", () => pick((t) => live(t) && isFinal(t))],
   ];
-  const runs = [...new Set(DATA.tasks.filter((t) => t.step > 0).map((t) => t.loop + "/" + t.run))];
+  if (stageTasks().some((t) => t.step === 0)) {
+    list.push([prefix + "原始模型 + 各实验最佳步", () => [...pick((t) => t.step === 0 && t.ablation === "correct"), ...[...best.values()].map((b) => b.id)]]);
+  }
+  if (stageTasks().some((t) => t.ablation === "static")) {
+    list.push([prefix + "correct vs static（最终步）", () => pick((t) => isFinal(t) && t.weights !== "ema")]);
+  }
+  const emaRuns = new Set(stageTasks().filter((t) => t.weights === "ema").map((t) => t.run + "/" + t.step));
+  if (emaRuns.size) {
+    list.push([prefix + "live vs EMA（同一 step）", () => pick((t) => emaRuns.has(t.run + "/" + t.step))]);
+  }
+  const runs = [...new Set(stageTasks().filter((t) => t.step > 0).map((t) => t.loop + "/" + t.run))];
   for (const key of runs) {
     const t0 = DATA.tasks.find((t) => t.loop + "/" + t.run === key);
-    list.push([t0.run_label + "：各 step（correct）",
+    list.push([t0.run_label + "：各 step",
       () => pick((t) => t.loop + "/" + t.run === key && t.ablation === "correct")]);
   }
   return list;
@@ -258,7 +334,7 @@ function renderSidebar() {
   chips($("f-kind"), KINDS, state.kind, (k) => k, KIND_HELP);
 
   const groups = new Map();
-  for (const t of DATA.tasks) {
+  for (const t of stageTasks()) {
     const g = groupOf(t);
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g).push(t);
@@ -270,8 +346,9 @@ function renderSidebar() {
     const title = g === BASE_GROUP ? "原始模型（无 LoRA）" : tasks[0].run_label;
     const loop = g === BASE_GROUP ? "" : tasks[0].loop;
     const n = tasks.filter((t) => chosen.has(t.id)).length;
+    const why = g === BASE_GROUP ? "MiniMax-H3 原始权重，不加 LoRA，作为每个对比的下限。" : noteOf(tasks[0]);
     div.innerHTML = `<div><span>${esc(title)} <span class="loop">${esc(loop)}</span></span>
-      <span class="dim">${n}/${tasks.length}</span></div><div class="items"></div>`;
+      <span class="dim">${n}/${tasks.length}</span></div>${why ? `<div class="why">${esc(why)}</div>` : ""}<div class="items"></div>`;
     div.firstElementChild.onclick = () => {
       const ids = tasks.map((t) => t.id), all = ids.every((id) => chosen.has(id));
       state.cols = all ? state.cols.filter((id) => !ids.includes(id)) : [...new Set([...state.cols, ...ids])];
@@ -280,7 +357,7 @@ function renderSidebar() {
     const items = div.lastElementChild;
     for (const t of tasks) {
       const label = document.createElement("label");
-      const text = g === BASE_GROUP ? t.label : "step " + t.step;
+      const text = (g === BASE_GROUP ? t.label : "step " + t.step) + (t.weights === "ema" ? " · EMA" : "");
       label.innerHTML = `<input type="checkbox" ${chosen.has(t.id) ? "checked" : ""}> ${esc(text)}
         <span class="dim">· ${esc(t.ablation)} · ${Object.keys(t.items).length}</span>`;
       label.firstElementChild.onchange = (e) => {
@@ -294,7 +371,7 @@ function renderSidebar() {
   $("ncols").textContent = `已选 ${selected().length}`;
 
   const ref = $("ref");
-  ref.innerHTML = `<option value="">（无）</option>` + DATA.tasks.map((t) =>
+  ref.innerHTML = `<option value="">（无）</option>` + stageTasks().map((t) =>
     `<option value="${esc(t.id)}" ${t.id === state.ref ? "selected" : ""}>${esc(t.label)} · ${esc(t.ablation)}</option>`).join("");
 }
 function chips(box, values, set, name, help) {
@@ -485,18 +562,24 @@ function zoom(card, video, rowSync) {
 
 // ---------- table view ----------
 function renderTable(root) {
-  const ids = sampleIds(), ref = TASKS.get(state.ref), d = METRICS[state.metric].digits;
+  const rowsShown = tableTasks(), ref = TASKS.get(state.ref), d = METRICS[state.metric].digits;
+  const filtered = sampleIds(), ids = state.common ? commonIds(rowsShown, filtered) : filtered;
   const groups = [["ALL", () => true], ...KINDS.map((k) => [k, (s) => s.kind === k]),
     ...MODS.map((m) => [m, (s) => s.modality === m])];
   const sel = new Set(state.cols);
-  root.insertAdjacentHTML("beforeend", `<div class="note">${METRICS[state.metric].name} 的样本均值，
-    只计入左侧筛选后的 ${ids.length} 个样本。小字为与参照列的配对差值（同一批样本逐个相减再平均）及“更好的样本数/共有样本数”。
-    勾选行即加入/移出视频对比的任务列。</div>`);
-  let html = `<table><thead><tr><th></th><th class="name">任务</th><th class="name">ablation</th>` +
+  const stage = STAGES.find(([k]) => k === state.stage);
+  root.insertAdjacentHTML("beforeend", `<div class="note">${stage ? esc(stage[1]) + "：" + esc(stage[2]) + "<br>" : ""}
+    ${METRICS[state.metric].name} 的样本均值，${state.common
+      ? `只计入表中每一行都评过的 ${ids.length} 个样本（共 ${filtered.length} 个通过筛选），各行用的是同一批样本`
+      : `计入左侧筛选后的 ${ids.length} 个样本，各行样本集可能不同`}。
+    小字为与参照列的配对差值（同一批样本逐个相减再平均）及“更好的样本数/共有样本数”。
+    “差异”一列列出与本阶段常规评测协议不同的地方，带标记的行不宜和其他行直接比较。勾选行即加入/移出视频对比的任务列。</div>`);
+  let html = `<table><thead><tr><th></th><th class="name">任务</th><th class="name">ablation</th><th class="name">差异</th>` +
     groups.map(([g]) => `<th>${g}</th>`).join("") + `</tr></thead><tbody>`;
-  for (const t of DATA.tasks) {
+  for (const t of rowsShown) {
+    const tags = protocolTags(t).map((x) => `<span class="tag proto">${esc(x)}</span>`).join(" ");
     html += `<tr class="${sel.has(t.id) ? "sel" : ""}" data-id="${esc(t.id)}"><td><input type="checkbox" ${sel.has(t.id) ? "checked" : ""}></td>
-      <td class="name">${esc(t.label)}</td><td class="name">${esc(t.ablation)}</td>`;
+      <td class="name" title="${esc(noteOf(t))}">${esc(t.label)}</td><td class="name">${esc(t.ablation)}</td><td class="name">${tags}</td>`;
     for (const [, test] of groups) {
       const sids = ids.filter((sid) => test(DATA.samples[sid] || {}) && value(t, sid) != null);
       const m = mean(sids.map((sid) => value(t, sid)));
@@ -521,9 +604,66 @@ function renderTable(root) {
   }
 }
 
+// ---------- notes view ----------
+function renderNotes(root) {
+  const d = METRICS[state.metric].digits, chosen = new Set(state.cols);
+  const stages = state.stage === "all" ? STAGES.filter(([k]) => k !== "all") : STAGES.filter(([k]) => k === state.stage);
+  root.insertAdjacentHTML("beforeend", `<div class="note">每张卡片是一个实验：设定说明、与本阶段常规评测协议的差异，以及每个已评 step 的
+    ${METRICS[state.metric].name}（同阶段 correct 任务共同评过的样本上的均值，绿框为该实验最佳）。点击 step 加入/移出任务列，点“看视频”跳到视频对比。</div>`);
+  for (const [key, name, blurb] of stages) {
+    const tasks = DATA.tasks.filter((t) => t.stage === key);
+    if (!tasks.length) continue;
+    const scored = tasks.filter((t) => t.ablation === "correct");
+    const ids = commonIds(scored, sampleIds());
+    const score = (t) => mean(ids.map((sid) => value(t, sid)));
+    const section = document.createElement("section"); section.className = "stage";
+    section.innerHTML = `<h2>${esc(name)} <span class="dim">· ${esc(blurb)} · 共同样本 ${ids.length}</span></h2><div class="cards"></div>`;
+    const cards = section.lastElementChild;
+    const groups = new Map();
+    for (const t of tasks) { const g = groupOf(t); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(t); }
+    for (const [g, list] of groups) {
+      const head = list[0], card = document.createElement("div"); card.className = "card";
+      const title = g === BASE_GROUP ? "原始模型（无 LoRA）" : head.run_label;
+      const note = g === BASE_GROUP ? "MiniMax-H3 原始权重，不加 LoRA。两个 prompt 版本分别对应普通 caption 缓存和模态描述缓存。" : noteOf(head);
+      const tags = [...new Set(list.filter((t) => t.ablation === "correct").flatMap(protocolTags))]
+        .filter((x) => !x.endsWith("消融") && x !== "EMA 权重" && !x.startsWith("原始模型"));
+      const correct = list.filter((t) => t.ablation === "correct");
+      const best = Math.max(...correct.filter((t) => t.weights !== "ema").map(score).filter((v) => v != null));
+      card.innerHTML = `<h4>${esc(title)} <span class="tag stage">${esc(key)}</span>
+        ${tags.map((x) => `<span class="tag proto">${esc(x)}</span>`).join("")}
+        <span class="dim" style="font-weight:400;font-size:11px">${esc(g === BASE_GROUP ? "" : head.run)}</span></h4>
+        <p>${note ? esc(note) : `<span class="dim">（还没有写设定说明）</span>`}</p>
+        <div class="steps"></div>`;
+      const steps = card.querySelector(".steps");
+      for (const t of list.sort((a, b) => a.step - b.step || a.ablation.localeCompare(b.ablation))) {
+        const v = t.ablation === "correct" ? score(t) : null;
+        const b = document.createElement("button");
+        const what = (g === BASE_GROUP ? t.label.replace(/^原始模型\s*·\s*/, "") : "@" + t.step) +
+          (t.weights === "ema" ? " EMA" : "") + (t.ablation !== "correct" ? " " + t.ablation : "");
+        b.textContent = what + (v != null ? " " + fmt(v, d) : "");
+        b.className = (chosen.has(t.id) ? "on " : "") + (v != null && v === best && t.weights !== "ema" ? "top" : "");
+        b.title = t.label + " · " + t.ablation;
+        b.onclick = () => {
+          state.cols = chosen.has(t.id) ? state.cols.filter((x) => x !== t.id) : [...state.cols, t.id];
+          update();
+        };
+        steps.append(b);
+      }
+      const go = document.createElement("button"); go.textContent = "看视频 ▸";
+      go.onclick = () => {
+        state.stage = key; state.cols = correct.map((t) => t.id); state.ref = state.cols[0] || ""; state.view = "compare"; update();
+      };
+      steps.append(go);
+      cards.append(card);
+    }
+    root.append(section);
+  }
+}
+
 // ---------- heatmap view ----------
 function renderHeat(root) {
-  const ids = sampleIds(), cols = selected(), ref = TASKS.get(state.ref);
+  const cols = selected(), ref = TASKS.get(state.ref);
+  const ids = state.common ? commonIds(cols, sampleIds()) : sampleIds();
   const { digits: d, scale } = METRICS[state.metric];
   root.insertAdjacentHTML("beforeend", `<div class="note">每格为 ${METRICS[state.metric].name}。
     ${ref ? "颜色 = 相对参照列的差值（绿好红差，±" + scale + " 饱和）" : "颜色 = 相对该行均值的差值"}。点击格子跳到该样本的视频对比。</div>`);
@@ -560,16 +700,25 @@ function update() {
   writeHash();
   document.documentElement.style.setProperty("--cell", state.width + "px");
   for (const b of $("tabs").children) b.className = b.dataset.view === state.view ? "on" : "";
+  for (const b of $("stages").children) b.className = b.dataset.stage === state.stage ? "on" : "";
   $("metric").value = state.metric; $("sort").value = state.sort; $("q").value = state.q;
   $("show-target").checked = state.target; $("show-proxy").checked = state.proxy; $("width").value = state.width;
+  $("common").checked = state.common; $("show-static").checked = state.statics;
   renderSidebar();
   const root = $("content");
   if (observer) observer.disconnect();
   for (const card of rows.keys()) attach(card, false);
   rows.clear(); root.innerHTML = "";
-  if (state.view === "table") renderTable(root);
+  if (state.view === "notes") renderNotes(root);
+  else if (state.view === "table") renderTable(root);
   else if (state.view === "heat") renderHeat(root);
   else renderCompare(root);
+}
+function setStage(stage) {
+  state.stage = stage;
+  if (!selected().length) { const [, fn] = presets()[0]; state.cols = [...new Set([...state.cols, ...fn()])]; }
+  if (!TASKS.has(state.ref) || !inStage(TASKS.get(state.ref))) state.ref = selected()[0]?.id || "";
+  update();
 }
 function visibleSyncs() {
   const h = window.innerHeight;
@@ -596,7 +745,14 @@ async function main() {
   const fromHash = readHash();
   try { adopt(await fetchIndex()); }
   catch (e) { $("content").textContent = "加载 index.json 失败：" + e; return; }
+  const present = new Set(DATA.tasks.map((t) => t.stage));
+  $("stages").innerHTML = STAGES.filter(([k]) => k === "all" || present.has(k))
+    .map(([k, name, blurb]) => `<button data-stage="${k}" title="${esc(blurb)}">${esc(name)}</button>`).join("");
+  if (!present.has(state.stage) && state.stage !== "all") state.stage = present.has("BD") ? "BD" : "all";
   if (!fromHash) { const [, fn] = presets()[0]; state.cols = fn(); state.ref = state.cols[0] || ""; }
+  for (const b of $("stages").children) b.onclick = () => setStage(b.dataset.stage);
+  $("common").onchange = (e) => { state.common = e.target.checked; update(); };
+  $("show-static").onchange = (e) => { state.statics = e.target.checked; update(); };
   for (const b of $("tabs").children) b.onclick = () => { state.view = b.dataset.view; update(); };
   $("metric").onchange = (e) => { state.metric = e.target.value; update(); };
   $("ref").onchange = (e) => { state.ref = e.target.value; update(); };

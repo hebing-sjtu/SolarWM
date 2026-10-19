@@ -1,0 +1,100 @@
+{
+  "about": "Settings of the gta_record_0930 MiniMax-H3 Ref2VA proxy omni LoRA runs, read by tools/eval_board/export.py --experiments. BD = Stage0.5 bidirectional, AR = Stage1 W6 AnyFlow, DMD = Stage2 SGF.",
+  "runs": {
+    "gta0930-r1-e1-unaligned": {
+      "label": "E1 · 不对齐",
+      "stage": "BD",
+      "note": "第一轮基线：全部 2728 个训练样本，lr 2e-5、batch 8、1000 步。参考视频（proxy）放在目标视频之前的独立时间段上，与目标没有逐帧时间对应。"
+    },
+    "gta0930-r1-e2-aligned": {
+      "label": "E2 · 时间对齐",
+      "stage": "BD",
+      "note": "与 E1 相同，只把 align_proxy_reference_time 设为 true：proxy 第 k 帧和目标第 k 帧共用同一个时间位置编码，检验逐帧对应是否帮助跟随运动。评测也用对齐方式，因此和其他 BD 行不是同一协议。"
+    },
+    "gta0930-r1-e3-coloronly": {
+      "label": "E3 · 仅彩色目标",
+      "stage": "BD",
+      "note": "与 E1 相同，但只用 718 个彩色（color）目标样本训练，去掉其余目标类型。检验较少但更干净的数据是否更好。"
+    },
+    "gta0930-r2a-color3x": {
+      "label": "R2-A · 彩色目标×3",
+      "stage": "BD",
+      "note": "第二轮：lr 2e-5、750 步。训练列表里彩色目标样本重复 3 次（过采样），其余样本保持一次，在不丢数据的前提下加大彩色目标的权重。"
+    },
+    "gta0930-r2b-described": {
+      "label": "R2-B · 模态描述 prompt",
+      "stage": "BD",
+      "note": "第二轮：lr 2e-5、750 步。prompt 前加一段说明参考模态的文字（如“语义背景色不代表画面内容”“不要照抄 low-poly 颜色”），视频 latent 与 E1 完全相同。评测用同样带说明的缓存 heldout32_desc，因此评测数据与其他行不同。"
+    },
+    "gta0930-r2c-allmod": {
+      "label": "R2-C · 全模态配对",
+      "stage": "BD",
+      "note": "第二轮：lr 2e-5、750 步。补编码了缺失的组合，让每个目标视频与每种参考模态都配对一次，检验更均衡的模态覆盖。"
+    },
+    "gta0930-r3a-lr6e-5": {
+      "label": "R3-A · lr 6e-5",
+      "stage": "BD",
+      "note": "第三轮学习率扫描：去掉 seg_0404（语义标注异常）后的干净列表，batch 8、300 步，lr 6e-5（E1 的 3 倍）。"
+    },
+    "gta0930-r3b-lr1e-4": {
+      "label": "R3-B · lr 1e-4",
+      "stage": "BD",
+      "note": "第三轮学习率扫描：同 R3-A 的数据和步数，lr 1e-4。"
+    },
+    "gta0930-r3c-lr2e-4": {
+      "label": "R3-C · lr 2e-4",
+      "stage": "BD",
+      "note": "第三轮学习率扫描：同 R3-A 的数据和步数，lr 2e-4。300 步时最好，被 S1-A 用作 AR 初始化。"
+    },
+    "gta0930-r4a-lr2e-4-s1200": {
+      "label": "R4-A · BD · lr 2e-4 · 1200 步",
+      "stage": "BD",
+      "note": "第四轮：在 R3-C 的 lr 2e-4 上延长到 1200 步，看更长训练是否继续提升。step 900 最好（PSNR late 约 19.5），是后续 AR 的初始化以及 DMD 的老师和 critic。"
+    },
+    "gta0930-r4b-lr4e-4-s300": {
+      "label": "R4-B · BD · lr 4e-4 · 300 步",
+      "stage": "BD",
+      "note": "第四轮：lr 再翻倍到 4e-4、300 步，检验更大学习率能否用更少步数达到同样效果。"
+    },
+    "gta0930-r4c-lr2e-4-s600": {
+      "label": "R4-C · BD · lr 2e-4 · 600 步",
+      "stage": "BD",
+      "note": "第四轮：lr 2e-4、600 步，学习率在 600 步内就衰减到峰值的 5%。与 R4-A 的 step 600（此时学习率仍较高）对比，看衰减长度的影响。"
+    },
+    "gta0930-r5a-oc-lr2e-4-s1200": {
+      "label": "R5-A · BD · 人物设定图 · 从头 1200 步",
+      "stage": "BD",
+      "note": "第五轮：在参考图里加入人物设定图（OC）作为 <Picture 2>，从原始模型开始以 R4-A 的配置（lr 2e-4、1200 步）训练。彩色目标不加 OC，其余目标 20% 概率随机去掉 OC，让模型同时适应有无 OC。"
+    },
+    "gta0930-r5b-oc-r4a900-lr1e-4-s600": {
+      "label": "R5-B · BD · 人物设定图 · R4A@900 续训 600 步",
+      "stage": "BD",
+      "note": "第五轮：从 R4-A step 900 的 LoRA 出发，加入人物设定图后再训 600 步（lr 1e-4），检验已有模型能否低成本学会使用 OC。数据和 OC 随机丢弃规则同 R5-A。"
+    },
+    "gta0930-s1a-lr1e-4-s600": {
+      "label": "S1-A · AR · 初始化 R3C@300 · batch 8",
+      "stage": "AR",
+      "note": "第一版 AR：从 BD 的 R3-C step 300 初始化，lr 1e-4、batch 8、600 步，学习按 5 个 latent 一块的因果滑窗生成。"
+    },
+    "gta0930-s1b-r4a900-lr1e-4-s600": {
+      "label": "S1-B · AR · 初始化 R4A@900 · batch 8",
+      "stage": "AR",
+      "note": "AR：改从更好的 BD（R4-A step 900）初始化，其余同 S1-A（lr 1e-4、batch 8、600 步）。step 600 是 DMD 的学生初始化。"
+    },
+    "gta0930-s1c-r4a900-b16-lr1e-4-s1200": {
+      "label": "S1-C · AR · 初始化 R4A@900 · batch 16",
+      "stage": "AR",
+      "note": "AR：同 S1-B 的初始化和 lr，但 batch 加倍到 16、训练 1200 步，检验更多数据量是否继续提升 AR。"
+    },
+    "gta0930-s2a-s1b600-r4a900": {
+      "label": "S2-A · DMD · 学生 S1-B@600 · batch 4",
+      "stage": "DMD",
+      "note": "第一版 DMD：学生从 AR 的 S1-B step 600 开始，老师和 critic 用 BD 的 R4-A step 900。学生 lr 4e-6、critic lr 8e-7，每更新一次学生更新 5 次 critic，batch 4、500 步。"
+    },
+    "gta0930-s2b-s1b600-r4a900-b8-s1000": {
+      "label": "S2-B · DMD · 学生 S1-B@600 · batch 8",
+      "stage": "DMD",
+      "note": "同 S2-A 的学生、老师、critic 和学习率，batch 加倍到 8、训练 1000 步。"
+    }
+  }
+}

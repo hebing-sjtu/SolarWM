@@ -13,13 +13,21 @@ copy by name. Scores are PSNR/SSIM of generated.mp4 against target.mp4 over all 
 frames >= --skip-frames, read from `<loop>-quality/<run>__<step>__<ablation>.json` beside the loop
 when present and computed and written there otherwise (the format r1_quality.py writes).
 
+Each task also carries its training stage and evaluation protocol, read from the task's
+resolved-config.json, so the board can compare runs of one stage under one protocol. Several
+--loops-root may be given (live and EMA evaluations live in separate roots under the same loop
+names); a task whose weights are neither live nor the base model gets an `@<weights>` id suffix.
+--experiments names a JSON file `{"runs": {RUN: {"label", "stage", "note"}}}` whose labels and
+2-3 sentence setting notes the board shows; --label still overrides a label.
+
 Directory scans use listings rather than path lookups: the /data gcsfuse mount can keep stale
 negative lookups for files that other nodes wrote later.
 
   python tools/eval_board/export.py --loops-root /data/binghe/h3_proxy/evals/loops \\
+      --loops-root /data/binghe/h3_proxy/evals/loops-ema \\
       --loop gta0930-omni-r1 --loop gta0930-omni-r2 \\
       --heldout /data/binghe/h3_proxy/manifests/gta_record_0930_omni_heldout32.jsonl \\
-      --out /workspace/eval-board --label gta0930-r1-e1-unaligned="E1 unaligned" --watch 600
+      --experiments docs/experiments/gta0930-omni-runs.json --out /workspace/eval-board --watch 600
 """
 
 from __future__ import annotations
@@ -43,6 +51,7 @@ STEP = re.compile(r"^step-(\d+)$")
 SLOT = re.compile(r"^slot-\d+$")
 VIDEOS = ("generated.mp4", "proxy.mp4", "target.mp4")
 FPS = 24
+STAGES = {"stage0p5": "BD", "stage1": "AR", "stage2": "DMD"}
 
 
 def listing(path: Path) -> set[str]:
@@ -179,6 +188,40 @@ def heldout_samples(path: Path) -> dict[str, dict]:
     return samples
 
 
+def task_protocol(task_dir: Path, ablation: str, weights: str) -> tuple[str | None, dict]:
+    """The task's stage (BD / AR / DMD) and what its numbers depend on besides the weights."""
+
+    protocol = {"ablation": ablation, "weights": weights}
+    if "resolved-config.json" not in listing(task_dir):
+        return None, protocol
+    config = json.loads((task_dir / "resolved-config.json").read_text())
+    config = config.get("config", config)
+    data, validation = config.get("data", {}), config.get("validation", {})
+    protocol.update(
+        {
+            "eval_data": Path(str(data.get("data_path", ""))).name,
+            "steps": validation.get("num_inference_steps"),
+            "sample_count": validation.get("sample_count"),
+            "noise_seed": validation.get("noise_seed"),
+            "aligned": bool(data.get("align_proxy_reference_time", False)),
+        }
+    )
+    stage = str(config.get("train", {}).get("stage", ""))
+    return STAGES.get(stage, stage or None), protocol
+
+
+def read_experiments(path: Path | None) -> dict[str, dict]:
+    if path is None:
+        return {}
+    runs = json.loads(path.read_text(encoding="utf-8")).get("runs", {})
+    for run, entry in runs.items():
+        if not isinstance(entry, dict):
+            raise SystemExit(f"{path}: runs.{run} must be an object")
+        if entry.get("stage") is not None and entry["stage"] not in STAGES.values():
+            raise SystemExit(f"{path}: runs.{run}.stage must be one of {list(STAGES.values())}")
+    return runs
+
+
 def parse_labels(pairs: list[str]) -> dict[str, str]:
     labels = {}
     for pair in pairs:
@@ -200,19 +243,30 @@ def export(args: argparse.Namespace) -> dict:
     media = out / "media"
     media.mkdir(parents=True, exist_ok=True)
     labels = parse_labels(args.label)
+    experiments = read_experiments(args.experiments)
     samples = heldout_samples(args.heldout)
     have = listing(media)
-    tasks, jobs, failed, frames = [], {}, [], None
+    tasks, jobs, failed, frames, seen = [], {}, [], None, set()
+    found = [
+        (root, task) for root in args.loops_root for task in finished_tasks(root, args.loop)
+    ]
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for task in finished_tasks(args.loops_root, args.loop):
+        for loops_root, task in found:
             loop, run, step, ablation = task
-            task_dir = args.loops_root.joinpath(*task)
+            task_dir = loops_root.joinpath(*task)
             slots = task_slots(task_dir)
             done = json.loads((task_dir / "DONE.json").read_text())
+            weights = done.get("weight_source", "live")
+            task_id = "/".join(task) + ("" if weights in ("live", "base") else f"@{weights}")
+            if task_id in seen:
+                failed.append(f"{task_id}: found again under {loops_root}; kept the first")
+                continue
+            seen.add(task_id)
             try:
-                scores = task_scores(args.loops_root, task, slots, args.skip_frames, pool)
+                scores = task_scores(loops_root, task, slots, args.skip_frames, pool)
+                stage, protocol = task_protocol(task_dir, ablation, weights)
             except (subprocess.CalledProcessError, OSError, KeyError, ValueError) as exc:
-                failed.append(f"{'/'.join(task)}: scoring failed: {exc}")
+                failed.append(f"{task_id}: scoring failed: {exc}")
                 continue
             items = {}
             for slot in slots:
@@ -241,18 +295,23 @@ def export(args: argparse.Namespace) -> dict:
                 )
                 items[sample_id] = item
             number = int(STEP.match(step).group(1))
-            run_label = labels.get(run, run)
+            experiment = experiments.get(run, {})
+            run_label = labels.get(run, experiment.get("label", run))
             default = f"{run_label} · base" if number == 0 else f"{run_label} · step {number}"
+            if weights not in ("live", "base"):
+                default += f" · {weights}"
             tasks.append(
                 {
-                    "id": "/".join(task),
+                    "id": task_id,
                     "loop": loop,
                     "run": run,
                     "step": number,
                     "ablation": ablation,
                     "run_label": run_label,
                     "label": labels.get(f"{run}/{step}", default),
-                    "weights": done.get("weight_source", "live"),
+                    "weights": weights,
+                    "stage": experiment.get("stage") or stage,
+                    "protocol": protocol,
                     "items": items,
                 }
             )
@@ -283,6 +342,10 @@ def export(args: argparse.Namespace) -> dict:
         "frames": frames,
         "skip_frames": args.skip_frames,
         "samples": samples,
+        "experiments": {
+            run: {key: entry[key] for key in ("label", "stage", "note") if key in entry}
+            for run, entry in experiments.items()
+        },
         "tasks": tasks,
         "reports": sorted(name for name in listing(out / "reports") if name.endswith(".md")),
     }
@@ -300,12 +363,17 @@ def export(args: argparse.Namespace) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--loops-root", type=Path, required=True)
+    parser.add_argument(
+        "--loops-root", type=Path, action="append", required=True, help="repeat for EMA roots"
+    )
     parser.add_argument("--loop", action="append", required=True, help="loop directory name")
     parser.add_argument("--heldout", type=Path, required=True, help="held-out manifest jsonl")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument(
         "--label", action="append", default=[], help="RUN=TEXT or RUN/step-NNNNNN=TEXT display name"
+    )
+    parser.add_argument(
+        "--experiments", type=Path, help='JSON {"runs": {RUN: {"label", "stage", "note"}}}'
     )
     parser.add_argument("--skip-frames", type=int, default=24)
     parser.add_argument("--crf", type=int, default=23)
