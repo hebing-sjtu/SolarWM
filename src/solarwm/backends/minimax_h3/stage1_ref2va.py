@@ -322,7 +322,8 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
         clean, pictures, proxy, prompt, tags, given = self._inputs(batch)
         aug = float(self.train["keyframe_noise_augmentation"])
         anchor_rows = torch.cat(
-            [patchify_video(scale_noise(image, noise_like(image), aug)) for image in pictures], dim=1
+            [patchify_video(scale_noise(image, noise_like(image), aug)) for image in pictures],
+            dim=1,
         )
         proxy = scale_noise(proxy, noise_like(proxy), aug)
         audio_clean = self._audio_rows(batch)

@@ -185,7 +185,7 @@ def test_oc_dropout_is_a_deterministic_training_only_coin(tmp_path: Path) -> Non
 
 def test_oc_config_is_validated() -> None:
     validate_h3_config(_config(oc_reference=True, oc_drop_prob=0.2))
-    with pytest.raises(ConfigurationError, match="requires data.oc_reference"):
+    with pytest.raises(ConfigurationError, match=r"requires data\.oc_reference"):
         validate_h3_config(_config(oc_drop_prob=0.2))
     with pytest.raises(ConfigurationError, match=r"\[0, 1\)"):
         validate_h3_config(_config(oc_reference=True, oc_drop_prob=1.0))

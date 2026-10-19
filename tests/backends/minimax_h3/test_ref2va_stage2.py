@@ -65,7 +65,12 @@ def test_windowed_clean_history_drops_only_clean_keys_past_the_window() -> None:
 
 @pytest.mark.parametrize(
     "arguments",
-    [dict(), dict(window_chunks=6), dict(num_proxy_references=2), dict(extra_image_sizes=((4, 6),))],
+    [
+        dict(),
+        dict(window_chunks=6),
+        dict(num_proxy_references=2),
+        dict(extra_image_sizes=((4, 6),)),
+    ],
 )
 def test_windowed_clean_block_mask_matches_dense_visibility(arguments: dict) -> None:
     source = _small(
@@ -107,7 +112,12 @@ def _sdpa(query, key, value):
 
 @pytest.mark.parametrize(
     "arguments",
-    [dict(), dict(window_chunks=6), dict(num_proxy_references=2), dict(extra_image_sizes=((4, 6),))],
+    [
+        dict(),
+        dict(window_chunks=6),
+        dict(num_proxy_references=2),
+        dict(extra_image_sizes=((4, 6),)),
+    ],
 )
 def test_cached_rollout_attention_matches_the_windowed_teacher_forced_document(
     arguments: dict,
