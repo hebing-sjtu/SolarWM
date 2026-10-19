@@ -234,6 +234,7 @@ def test_rollout_config_generates_the_take_with_the_trained_contract(tmp_path: P
     run = _run(runs, "omni-a", complete=[5])
     trained = load_config(MIXED, ["data.align_proxy_reference_time=true"]).mutable_copy()
     (run / "resolved-config.json").write_text(json.dumps(trained))
+    (tmp_path / "take.json").write_text(json.dumps({"name": "city"}))
     args = proxy_loop._parser().parse_args(
         [
             *("rollout", "--run", "omni-a", "--step", "5", "--run-root", str(runs)),
@@ -249,7 +250,8 @@ def test_rollout_config_generates_the_take_with_the_trained_contract(tmp_path: P
         "weight_source": "live",
     }
     assert config["data"]["align_proxy_reference_time"] is True
-    assert config["runtime"]["tracking"]["enabled"] is False
+    tracking = config["runtime"]["tracking"]
+    assert (tracking["run_name"], tracking["group"]) == ("rollout-city-omni-a-s5", "rollout")
     assert config["runtime"]["output_dir"] == str(tmp_path / "out")
 
 

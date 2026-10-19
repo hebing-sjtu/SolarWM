@@ -595,7 +595,8 @@ def rollout_config(args: argparse.Namespace, output_dir: Path) -> dict[str, Any]
     inference["proxy_take"] = str(Path(args.take).resolve())
     if args.take_cache:
         inference["proxy_take_cache"] = str(Path(args.take_cache).resolve())
-    config["runtime"]["tracking"]["enabled"] = False
+    take = json.loads(Path(args.take).read_text(encoding="utf-8")).get("name", "take")
+    config["runtime"]["tracking"]["run_name"] = f"rollout-{take}-{args.run}-s{args.step}"
     validate_h3_config(config)
     return config
 
