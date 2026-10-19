@@ -9,6 +9,8 @@ appear. Every command runs on a pod, normally inside a detached tmux session::
         --infer-config INFER_CFG --eval-data /data/.../heldout --steps 250 500
     python -m solarwm.backends.minimax_h3.proxy_loop status --runs omni-a omni-b --loop LOOP
     python -m solarwm.backends.minimax_h3.proxy_loop frames --loop LOOP --run omni-a --step 500
+    python -m solarwm.backends.minimax_h3.proxy_loop rollout --run omni-a --step 500 \\
+        --take /workspace/takes/T/take.json --take-cache /workspace/takes/T/cache --infer-config INFER_CFG
 
 ``/data`` is a GCS fuse mount: checkpoints are written there by training itself, but evaluation
 outputs are produced under ``/workspace`` and copied afterwards because the inference writer
@@ -31,6 +33,7 @@ from typing import Any
 
 RUN_ROOT = Path("/data/binghe/h3_proxy/solarwm-runs")
 EVAL_ROOT = Path("/data/binghe/h3_proxy/evals/loops")
+ROLLOUT_ROOT = Path("/data/binghe/h3_proxy/rollouts")
 LOCAL_ROOT = Path("/workspace/h3loop")
 WANDB_KEY_FILE = Path("/data/binghe/.secrets/wandb_api_key")
 NCCL_ENV_SCRIPT = Path("/usr/local/gib/scripts/set_nccl_env.sh")
@@ -570,6 +573,63 @@ def command_eval_worker(args: argparse.Namespace) -> int:
         time.sleep(args.poll_seconds)
 
 
+def rollout_config(args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
+    """An eval config of one checkpoint that generates ``--take`` instead of the held-out set."""
+
+    from .config import validate_h3_config
+
+    run_dir = Path(args.run_root) / args.run
+    run_config = json.loads((run_dir / "resolved-config.json").read_text(encoding="utf-8"))
+    task = EvalTask(run=args.run, step=args.step, ablation="correct")
+    config = eval_config(
+        _load(Path(args.infer_config), args.set, validate=False),
+        run_config,
+        task=task,
+        checkpoint=_checkpoint_dir(run_dir, args.step) if args.step else None,
+        eval_data=None,
+        weight_source=args.weight_source,
+        output_dir=output_dir,
+        loop="rollout",
+    )
+    inference = config.setdefault("inference", {})
+    inference["proxy_take"] = str(Path(args.take).resolve())
+    if args.take_cache:
+        inference["proxy_take_cache"] = str(Path(args.take_cache).resolve())
+    config["runtime"]["tracking"]["enabled"] = False
+    validate_h3_config(config)
+    return config
+
+
+def command_rollout(args: argparse.Namespace) -> int:
+    """Generate one long take with one checkpoint, locally first, then copied to ``--out-root``."""
+
+    take = json.loads(Path(args.take).read_text(encoding="utf-8"))
+    weights = args.weight_source if args.step else "base"
+    key = f"{take['name']}/{args.run}/step-{args.step:06d}-{weights}"
+    local = LOCAL_ROOT / "rollouts" / key
+    if local.exists():
+        shutil.rmtree(local)
+    local.mkdir(parents=True)
+    generated = local / "infer-config.json"
+    _write_json(generated, rollout_config(args, local))
+    if args.plan:
+        print(f"[h3-loop] rollout {key}: config {generated}")
+        return 0
+    if not args.no_warm:
+        warm_model_shards()
+    print(f"[h3-loop] rollout {key}", flush=True)
+    code = _launch(
+        ["-m", "solarwm", "infer", "--config", str(generated)],
+        nproc=args.nproc,
+        store_dir=LOCAL_ROOT / "stores",
+        env=launch_environment(),
+        log=local / "launch.log",
+    )
+    _copy_tree(local, Path(args.out_root) / key)
+    print(f"[h3-loop] rollout {key} exit={code} -> {Path(args.out_root) / key}", flush=True)
+    return code
+
+
 # ----------------------------------------------------------------------
 # status / frames
 # ----------------------------------------------------------------------
@@ -711,6 +771,23 @@ def _parser() -> argparse.ArgumentParser:
         help="override the infer base config",
     )
     worker.set_defaults(handler=command_eval_worker)
+
+    rollout = commands.add_parser(
+        "rollout", help="generate a long take segment by segment with one checkpoint"
+    )
+    common(rollout)
+    rollout.add_argument("--run", required=True)
+    rollout.add_argument("--step", type=int, required=True, help="0 is the base model")
+    rollout.add_argument("--take", required=True, help="take.json written by split_proxy_take.py")
+    rollout.add_argument("--take-cache", help="encoded clips; defaults to the take.json directory")
+    rollout.add_argument("--infer-config", required=True)
+    rollout.add_argument("--weight-source", choices=("ema", "live"), default="live")
+    rollout.add_argument("--out-root", default=str(ROLLOUT_ROOT))
+    rollout.add_argument("--nproc", type=int, default=8)
+    rollout.add_argument("--no-warm", action="store_true")
+    rollout.add_argument("--plan", action="store_true", help="write and validate the config only")
+    rollout.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    rollout.set_defaults(handler=command_rollout)
 
     status = commands.add_parser("status", help="print loss trend, checkpoints and evals as JSON")
     common(status)

@@ -229,6 +229,30 @@ def test_eval_config_carries_trained_contract_and_validates(tmp_path: Path) -> N
     assert infer["data"]["align_proxy_reference_time"] is False
 
 
+def test_rollout_config_generates_the_take_with_the_trained_contract(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    run = _run(runs, "omni-a", complete=[5])
+    trained = load_config(MIXED, ["data.align_proxy_reference_time=true"]).mutable_copy()
+    (run / "resolved-config.json").write_text(json.dumps(trained))
+    args = proxy_loop._parser().parse_args(
+        [
+            *("rollout", "--run", "omni-a", "--step", "5", "--run-root", str(runs)),
+            *("--take", str(tmp_path / "take.json"), "--take-cache", str(tmp_path / "cache")),
+            *("--infer-config", str(MIXED_INFER)),
+        ]
+    )
+    config = proxy_loop.rollout_config(args, tmp_path / "out")
+    assert config["inference"]["proxy_take"] == str(tmp_path / "take.json")
+    assert config["inference"]["proxy_take_cache"] == str(tmp_path / "cache")
+    assert config["checkpoint"] == {
+        "resume_from": str(run / "checkpoint_model_000005"),
+        "weight_source": "live",
+    }
+    assert config["data"]["align_proxy_reference_time"] is True
+    assert config["runtime"]["tracking"]["enabled"] is False
+    assert config["runtime"]["output_dir"] == str(tmp_path / "out")
+
+
 def test_loss_summary_reports_trend() -> None:
     events = [
         {
