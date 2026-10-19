@@ -234,10 +234,9 @@ class H3ProxyArtifactBatch:
     def image_latents(self) -> tuple[Any, ...]:
         """Reference pictures in ``<Picture N>`` order: the anchor, then the OC sheet if any."""
 
-        return (self.anchor_latents,) if self.oc_latents is None else (
-            self.anchor_latents,
-            self.oc_latents,
-        )
+        if self.oc_latents is None:
+            return (self.anchor_latents,)
+        return (self.anchor_latents, self.oc_latents)
 
 
 def oc_reference_from_data(data: Mapping[str, Any]) -> tuple[bool, float]:
