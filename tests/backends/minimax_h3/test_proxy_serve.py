@@ -55,6 +55,8 @@ def test_spool_claims_oldest_and_finishes_atomically(tmp_path: Path) -> None:
     spool.finish(claimed["id"], {"take": "x.mp4"})
     assert json.loads((spool.root / "done" / f"{claimed['id']}.json").read_text())["take"] == "x.mp4"
     assert not list((spool.root / "running").iterdir())
-    while spool.claim() is not None:
+    rival = Spool(spool.root, "rival")
+    while rival.claim() is not None:
         pass
+    assert spool.claim() is None
     assert "unreadable" in json.loads((spool.root / "done" / "bad.json").read_text())["error"]

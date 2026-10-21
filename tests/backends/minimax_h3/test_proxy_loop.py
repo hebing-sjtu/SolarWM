@@ -264,16 +264,16 @@ def test_serve_config_keeps_one_sp_group_on_the_spool(tmp_path: Path) -> None:
         [
             *("serve", "--run", "omni-a", "--step", "5", "--run-root", str(runs)),
             *("--spool", str(tmp_path / "spool"), "--data", str(tmp_path / "held.txt")),
-            *("--infer-config", str(MIXED_INFER)),
+            *("--infer-config", str(MIXED_INFER), "--worker", "gpu3"),
         ]
     )
     config = proxy_loop.serve_config(args, tmp_path / "out")
     assert config["inference"]["proxy_serve"] == str(tmp_path / "spool")
     assert "proxy_take" not in config["inference"]
-    assert config["distributed"]["world_size"] == config["distributed"]["sequence_parallel_size"] == 8
+    assert config["distributed"]["world_size"] == config["distributed"]["sequence_parallel_size"] == 1
     assert config["data"]["data_path"] == str(tmp_path / "held.txt")
     assert config["checkpoint"]["resume_from"] == str(run / "checkpoint_model_000005")
-    assert config["runtime"]["tracking"]["run_name"] == "serve-omni-a-s5"
+    assert config["runtime"]["tracking"]["run_name"] == "serve-omni-a-s5-gpu3"
 
 
 def test_loss_summary_reports_trend() -> None:

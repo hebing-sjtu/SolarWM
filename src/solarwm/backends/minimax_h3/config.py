@@ -621,6 +621,7 @@ def _validate_inference_distributed(
     stage: str = "stage0p5",
     full_length: bool = False,
     proxy: bool = False,
+    serve: bool = False,
 ) -> None:
     world_size = _positive_int(distributed, "world_size", "distributed")
     sequence_parallel = _positive_int(
@@ -628,11 +629,20 @@ def _validate_inference_distributed(
         "sequence_parallel_size",
         "distributed",
     )
-    expected_sp = 8 if proxy or full_length else (4 if stage == "stage2" else 2)
-    if full_length and world_size != 8:
-        raise ConfigurationError("Source-length H3 inference requires one eight-GPU SP8 worker")
-    if proxy and world_size != 8:
-        raise ConfigurationError("H3 proxy inference requires one eight-GPU SP8 worker")
+    if serve:
+        # A resident server is one SP group of any width; evaluation pins SP8 for comparable runs.
+        if sequence_parallel != world_size or world_size not in {1, 2, 4, 8}:
+            raise ConfigurationError(
+                "inference.proxy_serve runs one SP group: sequence_parallel_size == world_size "
+                "in {1, 2, 4, 8}"
+            )
+        expected_sp = world_size
+    else:
+        expected_sp = 8 if proxy or full_length else (4 if stage == "stage2" else 2)
+        if full_length and world_size != 8:
+            raise ConfigurationError("Source-length H3 inference requires one eight-GPU SP8 worker")
+        if proxy and world_size != 8:
+            raise ConfigurationError("H3 proxy inference requires one eight-GPU SP8 worker")
     if sequence_parallel != expected_sp or world_size % sequence_parallel:
         raise ConfigurationError(f"H3 inference requires a world divisible by SP{expected_sp}")
     for key, expected in (
@@ -803,6 +813,7 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
                 stage=stage,
                 full_length=full_length,
                 proxy=proxy,
+                serve=config.get("inference", {}).get("proxy_serve") is not None,
             )
             checkpoint = _mapping(config, "checkpoint")
             if proxy:
