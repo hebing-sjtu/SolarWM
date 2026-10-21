@@ -255,6 +255,27 @@ def test_rollout_config_generates_the_take_with_the_trained_contract(tmp_path: P
     assert config["runtime"]["output_dir"] == str(tmp_path / "out")
 
 
+def test_serve_config_keeps_one_sp_group_on_the_spool(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    run = _run(runs, "omni-a", complete=[5])
+    trained = load_config(MIXED, []).mutable_copy()
+    (run / "resolved-config.json").write_text(json.dumps(trained))
+    args = proxy_loop._parser().parse_args(
+        [
+            *("serve", "--run", "omni-a", "--step", "5", "--run-root", str(runs)),
+            *("--spool", str(tmp_path / "spool"), "--data", str(tmp_path / "held.txt")),
+            *("--infer-config", str(MIXED_INFER), "--nproc", "4"),
+        ]
+    )
+    config = proxy_loop.serve_config(args, tmp_path / "out")
+    assert config["inference"]["proxy_serve"] == str(tmp_path / "spool")
+    assert "proxy_take" not in config["inference"]
+    assert config["distributed"]["world_size"] == config["distributed"]["sequence_parallel_size"] == 4
+    assert config["data"]["data_path"] == str(tmp_path / "held.txt")
+    assert config["checkpoint"]["resume_from"] == str(run / "checkpoint_model_000005")
+    assert config["runtime"]["tracking"]["run_name"] == "serve-omni-a-s5"
+
+
 def test_loss_summary_reports_trend() -> None:
     events = [
         {

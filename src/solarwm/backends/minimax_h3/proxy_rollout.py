@@ -222,26 +222,55 @@ class _Mp4:
         self.writer.close()
 
 
-def run_proxy_rollout(config: Mapping[str, Any]) -> int:
-    """Roll one take out on every logical DP rank, each with its own noise seed."""
+@dataclass
+class _WriterState:
+    """The SP-rank-0 VAE, loaded on first use and kept across segments and takes."""
+
+    conditioners: Any = None
+
+    def vae(self, config: Mapping[str, Any], device: Any) -> Any:
+        from .optional import load_conditioners
+
+        if self.conditioners is None:
+            self.conditioners = load_conditioners(
+                config["model"],
+                device=device,
+                qwen=False,
+                video_vae=True,
+                audio_vae=False,
+                schedulers=False,
+            )
+        return self.conditioners.video_vae
+
+
+def roll_segments(
+    runtime: Any,
+    reader: Any,
+    segments: tuple[TakeSegment, ...],
+    *,
+    config: Mapping[str, Any],
+    root: Path,
+    fps: int,
+    real_target: bool,
+    seed: int,
+    steps: int,
+    writer: _WriterState,
+    max_frames: int | None = None,
+    progress: Any = None,
+) -> list[dict[str, Any]]:
+    """Generate ``segments`` in order, each continuing the last, into ``root``.
+
+    Every rank of the SP group calls this; SP rank 0 decodes, writes ``take.mp4``,
+    ``take_compare.mp4`` and ``segments/``, and alone returns the segment records.
+    ``max_frames`` caps the stitched movies; ``progress(done, total)`` runs on SP rank 0
+    after each segment.
+    """
 
     import numpy as np
 
     from .distributed import broadcast_sp_tensor, get_sp_rank
-    from .optional import load_conditioners
-    from .proxy_artifacts import H3ProxyPtStream
-    from .proxy_inference import load_proxy_runtime
     from .runtime import _collective_call, _collective_failures
 
-    inference = config["inference"]
-    data = config["data"]
-    cache_dir = inference.get("proxy_take_cache")
-    take = read_take(
-        Path(str(inference["proxy_take"])),
-        base_role=str(data["cwm_system"]),
-        cache_dir=Path(str(cache_dir)) if cache_dir else None,
-    )
-    runtime = load_proxy_runtime(config)
     torch, dist, topology, device, core = (
         runtime.torch,
         runtime.dist,
@@ -249,27 +278,17 @@ def run_proxy_rollout(config: Mapping[str, Any]) -> int:
         runtime.device,
         runtime.core,
     )
-    core.continuation = True
-    reader_config = copy.deepcopy(dict(config))
-    reader_config["data"] = {**data, "data_path": str(take.segments[0].path.parent)}
-    reader = H3ProxyPtStream(reader_config, topology, continuation=True)
-    steps = int(config["validation"]["num_inference_steps"])
-    seed = int(config["validation"]["noise_seed"]) + int(topology.dp_rank)
-    root = (
-        Path(str(config["runtime"]["output_dir"])).resolve()
-        / "proxy-rollout"
-        / f"dp-rank-{topology.dp_rank:05d}"
-    )
+    data = config["data"]
     writer_rank = get_sp_rank() == 0
-    spans = stitch_spans(len(take.segments))
+    spans = stitch_spans(len(segments))
     given_shape = (1, 24, GIVEN_LATENTS, int(data["latent_height"]), int(data["latent_width"]))
+    cap = take_frames(len(segments)) if max_frames is None else int(max_frames)
 
-    conditioners = None
     movies: dict[str, _Mp4] = {}
     records: list[dict[str, Any]] = []
     given = None
     try:
-        for segment, (first, stop) in zip(take.segments, spans, strict=True):
+        for segment, (first, stop) in zip(segments, spans, strict=True):
             batch = _collective_call(
                 lambda segment=segment: reader.read(segment.path),
                 dist=dist,
@@ -292,7 +311,7 @@ def run_proxy_rollout(config: Mapping[str, Any]) -> int:
                 topology=topology,
                 label=f"take segment {segment.index} generation",
             )
-            last = segment.index == len(take.segments) - 1
+            last = segment.index == len(segments) - 1
             given = None if last else torch.zeros(given_shape, device=device, dtype=torch.float32)
             local_error = ""
             if writer_rank:
@@ -301,16 +320,7 @@ def run_proxy_rollout(config: Mapping[str, Any]) -> int:
 
                     from .inference import _mp4_bytes, decode_h3_latents
 
-                    if conditioners is None:
-                        conditioners = load_conditioners(
-                            config["model"],
-                            device=device,
-                            qwen=False,
-                            video_vae=True,
-                            audio_vae=False,
-                            schedulers=False,
-                        )
-                    vae = conditioners.video_vae
+                    vae = writer.vae(config, device)
                     generated = decode_h3_latents(vae, latents, device=device)
                     if not last:
                         tail = generated[:, :, STRIDE_FRAMES:SEGMENT_FRAMES]
@@ -325,7 +335,7 @@ def run_proxy_rollout(config: Mapping[str, Any]) -> int:
                     panels = [_frames_uint8(_proxy_pixels(vae, batch.proxy_latents, size, device=device))]
                     produced = _frames_uint8(generated)
                     panels.append(produced)
-                    if take.target == "real":
+                    if real_target:
                         target = batch.target_latents.unsqueeze(0)
                         panels.append(_frames_uint8(decode_h3_latents(vae, target, device=device)))
                     compare = np.concatenate(panels, axis=2)
@@ -335,33 +345,37 @@ def run_proxy_rollout(config: Mapping[str, Any]) -> int:
                         {"latents": latents.detach().to("cpu", dtype=torch.bfloat16).contiguous()},
                         str(folder / "generated.safetensors"),
                     )
-                    (folder / "generated.mp4").write_bytes(_mp4_bytes(generated, fps=take.fps))
-                    segment_movie = _Mp4(folder / "compare.mp4", take.fps)
+                    (folder / "generated.mp4").write_bytes(_mp4_bytes(generated, fps=fps))
+                    segment_movie = _Mp4(folder / "compare.mp4", fps)
                     segment_movie.extend(compare)
                     segment_movie.close()
                     if not movies:
                         movies = {
-                            "take": _Mp4(root / "take.mp4", take.fps),
-                            "compare": _Mp4(root / "take_compare.mp4", take.fps),
+                            "take": _Mp4(root / "take.mp4", fps),
+                            "compare": _Mp4(root / "take_compare.mp4", fps),
                         }
-                    movies["take"].extend(produced[first:stop])
-                    movies["compare"].extend(compare[first:stop])
+                    begin = segment.start + first
+                    keep = max(0, min(stop, cap - segment.start) - first)
+                    movies["take"].extend(produced[first : first + keep])
+                    movies["compare"].extend(compare[first : first + keep])
                     records.append(
                         {
                             "index": segment.index,
                             "name": segment.name,
                             "cwm_system": segment.cwm_system,
                             "noise_seed": segment_seed,
-                            "take_frames": [segment.start + first, segment.start + stop],
-                            "segment_frames": [first, stop],
+                            "take_frames": [begin, begin + keep],
+                            "segment_frames": [first, first + keep],
                             "sample": str(segment.path),
                         }
                     )
                     print(
                         f"[h3-proxy-rollout] dp={topology.dp_rank} segment {segment.index + 1}/"
-                        f"{len(take.segments)} frames {segment.start + first}..{segment.start + stop}",
+                        f"{len(segments)} frames {begin}..{begin + keep}",
                         flush=True,
                     )
+                    if progress is not None:
+                        progress(segment.index + 1, len(segments))
                 except Exception as exc:
                     local_error = f"rank {topology.raw_rank}: {type(exc).__name__}: {exc}"
             failures = _collective_failures(dist, topology, local_error)
@@ -372,6 +386,53 @@ def run_proxy_rollout(config: Mapping[str, Any]) -> int:
     finally:
         for movie in movies.values():
             movie.close()
+    return records
+
+
+def run_proxy_rollout(config: Mapping[str, Any]) -> int:
+    """Roll one take out on every logical DP rank, each with its own noise seed."""
+
+    from .distributed import get_sp_rank
+    from .proxy_artifacts import H3ProxyPtStream
+    from .proxy_inference import load_proxy_runtime
+    from .runtime import _collective_failures
+
+    inference = config["inference"]
+    data = config["data"]
+    cache_dir = inference.get("proxy_take_cache")
+    take = read_take(
+        Path(str(inference["proxy_take"])),
+        base_role=str(data["cwm_system"]),
+        cache_dir=Path(str(cache_dir)) if cache_dir else None,
+    )
+    runtime = load_proxy_runtime(config)
+    dist, topology = runtime.dist, runtime.topology
+    runtime.core.continuation = True
+    reader_config = copy.deepcopy(dict(config))
+    reader_config["data"] = {**data, "data_path": str(take.segments[0].path.parent)}
+    reader = H3ProxyPtStream(reader_config, topology, continuation=True)
+    steps = int(config["validation"]["num_inference_steps"])
+    seed = int(config["validation"]["noise_seed"]) + int(topology.dp_rank)
+    root = (
+        Path(str(config["runtime"]["output_dir"])).resolve()
+        / "proxy-rollout"
+        / f"dp-rank-{topology.dp_rank:05d}"
+    )
+    writer_rank = get_sp_rank() == 0
+    try:
+        records = roll_segments(
+            runtime,
+            reader,
+            take.segments,
+            config=config,
+            root=root,
+            fps=take.fps,
+            real_target=take.target == "real",
+            seed=seed,
+            steps=steps,
+            writer=_WriterState(),
+        )
+    finally:
         reader.close()
 
     local_error = ""
@@ -416,6 +477,7 @@ __all__ = [
     "TakeSegment",
     "encode_h3_pixels",
     "read_take",
+    "roll_segments",
     "run_proxy_rollout",
     "stitch_spans",
     "take_frames",

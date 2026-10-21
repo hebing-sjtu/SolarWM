@@ -1481,6 +1481,10 @@ def run_inference(config: Mapping[str, Any]) -> int:
             from .proxy_rollout import run_proxy_rollout
 
             return run_proxy_rollout(config)
+        if config.get("inference", {}).get("proxy_serve"):
+            from .proxy_serve import run_proxy_serve
+
+            return run_proxy_serve(config)
         from .proxy_inference import run_proxy_inference
 
         return run_proxy_inference(config)

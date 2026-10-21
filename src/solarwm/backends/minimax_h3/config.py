@@ -685,6 +685,18 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
             )
         if inference.get("proxy_take_cache") is not None:
             _nonempty_path(inference, "proxy_take_cache", "inference")
+    if inference.get("proxy_serve") is not None:
+        if action != "infer" or full_length or inference.get("proxy_take") is not None:
+            raise ConfigurationError(
+                "inference.proxy_serve is a fixed-length proxy inference input without proxy_take"
+            )
+        _nonempty_path(inference, "proxy_serve", "inference")
+        if str(config.get("data", {}).get("input_mode", "")).lower() != "proxy_preencoded":
+            raise ConfigurationError("inference.proxy_serve requires data.input_mode=proxy_preencoded")
+        if config.get("data", {}).get("cwm_system") not in CWM_CONTINUATION_ROLES:
+            raise ConfigurationError(
+                f"inference.proxy_serve requires data.cwm_system in {sorted(CWM_CONTINUATION_ROLES)}"
+            )
     model = _mapping(config, "model")
     data = _mapping(config, "data")
     metadata = config.get("metadata", {})
