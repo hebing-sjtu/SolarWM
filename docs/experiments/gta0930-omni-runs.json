@@ -95,6 +95,16 @@
       "label": "S2-B · DMD · 学生 S1-B@600 · batch 8",
       "stage": "DMD",
       "note": "同 S2-A 的学生、老师、critic 和学习率，batch 加倍到 8、训练 1000 步。"
+    },
+    "gta0930-s2b-ext-s2000": {
+      "label": "S2-B 续训 · DMD · 1000→2000 步",
+      "stage": "DMD",
+      "note": "S2-B 从 step 1000 原样续训到 2000 步（学习率恒定，配置不变），检验 DMD 在 1000 步后是否还在提升，结果决定 OC 版 DMD 训多少步。"
+    },
+    "gta0930-s3a-oc-r5b600-b16-lr1e-4-s900": {
+      "label": "S3-A · AR · OC · 初始化 R5B@600 · batch 16",
+      "stage": "AR",
+      "note": "带人物设定图（OC）的 AR：学生从 BD-OC 的 R5-B step 600 初始化，其余沿用 S1-C 的配方（lr 1e-4、batch 16），训练 900 步。数据与 R5 相同：high 行带 OC 并随机丢弃 20%，color 行不带 OC。"
     }
   }
 }
