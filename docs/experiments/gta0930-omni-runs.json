@@ -105,6 +105,11 @@
       "label": "S3-A · AR · OC · 初始化 R5B@600 · batch 16",
       "stage": "AR",
       "note": "带人物设定图（OC）的 AR：学生从 BD-OC 的 R5-B step 600 初始化，其余沿用 S1-C 的配方（lr 1e-4、batch 16），训练 900 步。数据与 R5 相同：high 行带 OC 并随机丢弃 20%，color 行不带 OC。"
+    },
+    "gta0930-s4a-oc-s3a600-r5b600-b8-s2000": {
+      "label": "S4-A · DMD · OC · 学生 S3A@600 · 老师 R5B@600",
+      "stage": "DMD",
+      "note": "带 OC 的 DMD：学生从 OC 版 AR（S3-A step 600）开始，老师和 critic 用 BD-OC 的 R5-B step 600。其余沿用 S2-B（学生 lr 4e-6、critic lr 8e-7、batch 8），训练 2000 步。"
     }
   }
 }
