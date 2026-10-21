@@ -183,7 +183,8 @@ def run_proxy_serve(config: Mapping[str, Any]) -> int:
                             message = [{"job": job, "segments": [str(s.path) for s in segments]}]
                         except DataContractError as exc:
                             spool.finish(job["id"], {"error": str(exc)})
-            dist.broadcast_object_list(message, src=0)
+            if dist.is_initialized():
+                dist.broadcast_object_list(message, src=0)
             command = message[0]
             if command is None:
                 if spool is not None:
