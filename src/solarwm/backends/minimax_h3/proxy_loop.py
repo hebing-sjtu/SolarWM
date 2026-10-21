@@ -649,8 +649,6 @@ def serve_config(args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
         output_dir=output_dir,
         loop="serve",
     )
-    config["distributed"]["world_size"] = int(args.nproc)
-    config["distributed"]["sequence_parallel_size"] = int(args.nproc)
     config.setdefault("inference", {})["proxy_serve"] = str(Path(args.spool).resolve())
     config["runtime"]["tracking"]["run_name"] = f"serve-{args.run}-s{args.step}"
     validate_h3_config(config)
@@ -666,7 +664,8 @@ def command_serve(args: argparse.Namespace) -> int:
     Path(args.spool).mkdir(parents=True, exist_ok=True)
     (Path(args.spool) / "STOP").unlink(missing_ok=True)
     generated = local / "infer-config.json"
-    _write_json(generated, serve_config(args, local))
+    config = serve_config(args, local)
+    _write_json(generated, config)
     if args.plan:
         print(f"[h3-loop] serve {args.run}@{args.step}: config {generated}")
         return 0
@@ -675,7 +674,7 @@ def command_serve(args: argparse.Namespace) -> int:
     print(f"[h3-loop] serve {args.run}@{args.step} spool={args.spool}", flush=True)
     return _launch(
         ["-m", "solarwm", "infer", "--config", str(generated)],
-        nproc=args.nproc,
+        nproc=int(config["distributed"]["world_size"]),
         store_dir=LOCAL_ROOT / "stores",
         env=launch_environment(),
         log=local / "launch.log",
@@ -849,7 +848,6 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--data", required=True, help="any small cache of the run's contract, to open the reader")
     serve.add_argument("--infer-config", required=True)
     serve.add_argument("--weight-source", choices=("ema", "live"), default="live")
-    serve.add_argument("--nproc", type=int, default=8, help="one SP group of this many GPUs")
     serve.add_argument("--no-warm", action="store_true")
     serve.add_argument("--plan", action="store_true", help="write and validate the config only")
     serve.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
