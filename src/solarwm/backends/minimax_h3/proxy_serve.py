@@ -105,8 +105,13 @@ class Spool:
     def claim(self) -> dict[str, Any] | None:
         """The oldest queued job, moved to ``running/``; a malformed one is failed on the spot."""
 
-        queued = sorted(self.root.glob("queue/*.json"), key=lambda path: (path.stat().st_mtime, path.name))
-        for path in queued:
+        queued = []
+        for path in self.root.glob("queue/*.json"):
+            try:
+                queued.append((path.stat().st_mtime, path.name, path))
+            except FileNotFoundError:
+                continue  # claimed by another worker since the listing
+        for _, _, path in sorted(queued):
             running = self.root / "running" / path.name
             try:
                 os.replace(path, running)

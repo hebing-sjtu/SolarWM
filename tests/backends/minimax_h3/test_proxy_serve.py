@@ -60,3 +60,18 @@ def test_spool_claims_oldest_and_finishes_atomically(tmp_path: Path) -> None:
         pass
     assert spool.claim() is None
     assert "unreadable" in json.loads((spool.root / "done" / "bad.json").read_text())["error"]
+
+
+def test_spool_claim_skips_jobs_taken_between_listing_and_stat(tmp_path: Path, monkeypatch) -> None:
+    spool = Spool(tmp_path / "spool")
+    for name in ("gone", "kept"):
+        (spool.root / "queue" / f"{name}.json").write_text(json.dumps({"schema": JOB_SCHEMA}))
+    stat = Path.stat
+
+    def racing_stat(path: Path, *args, **kwargs):
+        if path.name == "gone.json":
+            path.unlink(missing_ok=True)
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", racing_stat)
+    assert spool.claim()["id"] == "kept"
