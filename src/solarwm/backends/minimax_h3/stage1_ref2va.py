@@ -98,6 +98,10 @@ class H3Ref2VAStage1Core(H3Ref2VAStage0p5Core):
         self._windows: OrderedDict[tuple[Any, ...], tuple[Any, Any]] = OrderedDict()
         self._check_train_frames()
 
+    def release_window_cache(self) -> None:
+        """Drops the cached window layouts and masks; they are keyed by the prompt's token tags."""
+        self._windows.clear()
+
     def _check_train_frames(self) -> None:
         if self.train_frames % CHUNK_LATENTS or self.train_frames > self.target_frames:
             raise ValueError(

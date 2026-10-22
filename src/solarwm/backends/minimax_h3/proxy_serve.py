@@ -262,6 +262,10 @@ def run_proxy_serve(config: Mapping[str, Any]) -> int:
                     f"{'failed: ' + error if error else 'done'} in {result['seconds']}s",
                     flush=True,
                 )
+            # A causal core caches window masks per prompt; the next job's prompt never matches.
+            release = getattr(runtime.core, "release_window_cache", None)
+            if release is not None:
+                release()
             torch.cuda.empty_cache()
     finally:
         reader.close()
