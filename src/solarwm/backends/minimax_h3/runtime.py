@@ -1457,9 +1457,15 @@ def run_training(config: Mapping[str, Any]) -> int:
                 "peak_allocated_gib": runtime.torch.cuda.max_memory_allocated(runtime.device)
                 / (1024**3),
             }
-            loss = event["losses"][str(train["objective"])]
+            losses = event["losses"]
+            loss = losses["dpo" if runtime.dpo else str(train["objective"])]
+            extra = (
+                f" dpo_accuracy={losses['dpo_accuracy']:.3f} margin={losses['dpo_reward_margin']:.3e}"
+                if runtime.dpo
+                else ""
+            )
             print(
-                f"[h3-{runtime.stage}] step={event['step']} loss={loss:.8f} "
+                f"[h3-{runtime.stage}] step={event['step']} loss={loss:.8f}{extra} "
                 f"lr={event['lr']:.3e} compute_time_s={event['compute_time_s']:.2f}",
                 flush=True,
             )
