@@ -777,6 +777,16 @@ def validate_h3_config(config: Mapping[str, Any]) -> H3RunContract:
                     raise ConfigurationError(
                         "H3 proxy Stage2 needs student, teacher and critic initialization"
                     )
+                if str(train.get("objective_variant", "")).strip().lower() == "dpo":
+                    if initialization_value is None:
+                        raise ConfigurationError(
+                            "H3 DPO needs checkpoint.initialization.student: it is also the reference"
+                        )
+                    dpo = _mapping(train, "dpo")
+                    if not float(dpo.get("beta", 0.0)) > 0.0:
+                        raise ConfigurationError("train.dpo.beta must be positive")
+                    if float(dpo.get("sft_weight", 0.0)) < 0.0:
+                        raise ConfigurationError("train.dpo.sft_weight must be non-negative")
                 if initialization_value is not None:
                     initialization = _mapping(checkpoint, "initialization")
                     roles = ("student", "teacher", "critic") if stage == "stage2" else ("student",)

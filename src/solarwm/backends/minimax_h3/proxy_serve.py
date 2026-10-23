@@ -213,6 +213,7 @@ def run_proxy_serve(config: Mapping[str, Any]) -> int:
             steps = int(job.get("steps") or default_steps)
             seed = int(job.get("seed") if job.get("seed") is not None else default_seed)
             frames = int(job.get("frames") or take_frames(len(segments)))
+            real_target = bool(job.get("real_target"))
             try:
                 records = roll_segments(
                     runtime,
@@ -221,7 +222,7 @@ def run_proxy_serve(config: Mapping[str, Any]) -> int:
                     config=config,
                     root=out,
                     fps=int(job.get("fps") or 24),
-                    real_target=False,
+                    real_target=real_target,
                     seed=seed,
                     steps=steps,
                     writer=writer,
@@ -252,7 +253,7 @@ def run_proxy_serve(config: Mapping[str, Any]) -> int:
                         {
                             "take": str(out / "take.mp4"),
                             "compare": str(out / "take_compare.mp4"),
-                            "panel_order": ["proxy", "prediction"],
+                            "panel_order": ["proxy", "prediction"] + (["target"] if real_target else []),
                             "segments": records,
                         }
                     )

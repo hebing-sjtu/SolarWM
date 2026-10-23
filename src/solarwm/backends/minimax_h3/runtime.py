@@ -8,8 +8,8 @@ import math
 import os
 import random
 import time
-from collections.abc import Mapping, Sequence
-from contextlib import nullcontext
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -23,7 +23,7 @@ from solarwm.checkpoint import (
     verify_checkpoint,
 )
 from solarwm.data import resolve_index_path
-from solarwm.errors import BackendContractError
+from solarwm.errors import BackendContractError, DataContractError
 from solarwm.inference import (
     InferenceCase,
     InferenceEngine,
@@ -582,6 +582,12 @@ class H3TrainingRuntime:
                 self.checkpoint_cfg["initialization"]["student"],
                 self.lora,
             )
+        self.dpo = str(self.train_cfg.get("objective_variant", "")).strip().lower() == "dpo"
+        # The DPO reference is the initialization; LoRA weights are replicated outside FSDP, so the
+        # reference forward swaps them in place. Taken before any resume overwrites the live ones.
+        self._reference_lora = (
+            [parameter.detach().clone() for parameter in self.lora.parameters] if self.dpo else None
+        )
         self.objective_seed = int(identity.objective_seed)
         optimizer_cfg = self.train_cfg["optimizer"]
         self.optimizer = FP32MasterAdamW(
@@ -720,6 +726,10 @@ class H3TrainingRuntime:
             if should_sync or not hasattr(self.model, "no_sync")
             else self.model.no_sync()
         )
+        if self.dpo:
+            with context:
+                losses = self._dpo_microbatch(batch, float(int(grad_accum) * get_sp_size()))
+            return MicrobatchResult(identity=identity, losses=losses)
         with context:
             loss = self.core.forward_loss(batch, noise_seed=None)
             if not bool(self.torch.isfinite(loss).item()):
@@ -733,6 +743,64 @@ class H3TrainingRuntime:
         return MicrobatchResult(
             identity=identity, losses={str(self.train_cfg["objective"]): loss_value}
         )
+
+    @contextmanager
+    def _reference_weights(self) -> Iterator[None]:
+        live = [parameter.detach().clone() for parameter in self.lora.parameters]
+        for parameter, reference in zip(self.lora.parameters, self._reference_lora):
+            parameter.data.copy_(reference)
+        try:
+            yield
+        finally:
+            for parameter, value in zip(self.lora.parameters, live):
+                parameter.data.copy_(value)
+
+    def _dpo_microbatch(self, batch: Any, scale: float) -> dict[str, float]:
+        """Diffusion-DPO on one preference pair, with exact gradients and one graph alive at a time.
+
+        L = -log sigmoid(-beta * ((e_w - r_w) - (e_l - r_l))) over the flow-matching errors of the
+        policy (e) and reference (r) on the preferred (w) and rejected (l) latents, all four under
+        the same noise and timestep. dL/de_w = beta * sigmoid(beta * margin) = -dL/de_l, so the
+        coefficient comes from no-grad passes and each policy branch is backpropagated alone.
+        """
+        torch = self.torch
+        if batch.target_latents_lose is None:
+            raise DataContractError(f"DPO sample {batch.sample_id} has no vae_latent_lose")
+        dpo = self.train_cfg["dpo"]
+        beta, sft = float(dpo["beta"]), float(dpo.get("sft_weight", 0.0))
+        seed = int(torch.randint(0, 2**31 - 1, (), device=self.device).item())
+        win, lose = batch.target_latents, batch.target_latents_lose
+
+        def error(target: Any) -> Any:
+            return self.core.forward_loss(batch, noise_seed=seed, target=target)
+
+        with torch.no_grad():
+            with self._reference_weights():
+                ref_win, ref_lose = error(win), error(lose)
+            pol_lose = error(lose)
+        pol_win = error(win)
+        margin = (pol_win.detach() - ref_win) - (pol_lose - ref_lose)
+        coefficient = beta * torch.sigmoid(beta * margin)
+        ((coefficient + sft) * pol_win / scale).backward()
+        (-coefficient * error(lose) / scale).backward()
+        stats = torch.stack(
+            (
+                -torch.nn.functional.logsigmoid(-beta * margin),
+                (margin < 0).float(),
+                -margin,
+                pol_win.detach(),
+                pol_lose,
+                ref_win,
+                ref_lose,
+            )
+        ).float()
+        if not bool(torch.isfinite(stats).all().item()):
+            raise FloatingPointError("H3 DPO statistics are non-finite")
+        if self.dist.is_initialized() and get_dp_world_size() > 1:
+            self.dist.all_reduce(stats, group=get_dp_group())
+            stats.div_(get_dp_world_size())
+        names = ("dpo", "dpo_accuracy", "dpo_reward_margin", "mse_win", "mse_lose", "ref_mse_win", "ref_mse_lose")
+        return dict(zip(names, (float(value) for value in stats.tolist())))
 
     def assert_sp_peer_identity(self, identity: BatchIdentity) -> None:
         del identity

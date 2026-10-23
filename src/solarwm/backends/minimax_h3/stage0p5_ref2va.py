@@ -191,7 +191,10 @@ class H3Ref2VAStage0p5Core:
         )
         return video[:, layout.target_video_output_slice]
 
-    def forward_loss(self, batch: H3ProxyArtifactBatch, *, noise_seed: int | None) -> Any:
+    def forward_loss(
+        self, batch: H3ProxyArtifactBatch, *, noise_seed: int | None, target: Any = None
+    ) -> Any:
+        """Flow-matching loss on ``target`` (default the batch's), whose given latents are the batch's."""
         import torch
         import torch.nn.functional as F
 
@@ -212,6 +215,16 @@ class H3Ref2VAStage0p5Core:
         clean = batch.target_latents.to(
             self.device, dtype=torch.float32, non_blocking=True
         ).unsqueeze(0)
+        if target is not None:
+            given_latents = int(batch.num_given_latent_frames)
+            clean = torch.cat(
+                (
+                    clean[:, :, :given_latents],
+                    target.to(self.device, dtype=torch.float32, non_blocking=True)
+                    .unsqueeze(0)[:, :, given_latents:],
+                ),
+                dim=2,
+            )
         pictures = _picture_inputs(batch, self.device)
         proxy = _pad_spatial(
             _proxy_videos(

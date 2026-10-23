@@ -234,6 +234,8 @@ class H3ProxyArtifactBatch:
     oc_latents: Any = None
     prompt_embeds_no_oc: Any = None
     text_token_tags_no_oc: Any = None
+    # Preference pairs: ``target_latents`` is the preferred video, this the rejected one.
+    target_latents_lose: Any = None
 
     def image_latents(self) -> tuple[Any, ...]:
         """Reference pictures in ``<Picture N>`` order: the anchor, then the OC sheet if any."""
@@ -532,6 +534,10 @@ class H3ProxyPtStream:
         if audio is not None:
             audio = self._float_tensor(audio, "audio_latent")
             self._shape(audio, (2, 32, None), "audio_latent")
+        lose = payload.get("vae_latent_lose")
+        if lose is not None:
+            lose = self._float_tensor(lose, "vae_latent_lose")
+            self._shape(lose, tuple(target.shape), "vae_latent_lose")
 
         identity = hashlib.blake2s(
             f"{path.resolve()}\0{path.stat().st_size}".encode(), digest_size=16
@@ -552,6 +558,7 @@ class H3ProxyPtStream:
             num_given_latent_frames=_CWM_GIVEN_FRAMES[role],
             audio_latents=audio,
             proxy_references=sample_references,
+            target_latents_lose=lose,
             **fields,
         )
 
