@@ -62,13 +62,15 @@ train:
 
 checkpoint:
   save_every_steps: 100
+  weights_dtype: bfloat16
+  resume_every_steps: 400
   ema:
     enabled: false
     decay: 0.9999
     start_step: 0
 
 runtime:
-  output_dir: /workspace/wan_proxy/runs/wan5b-ref2va-stage0p5-121f
+  output_dir: /data/binghe/wan_proxy/runs/wan5b-ref2va-stage0p5-121f
   tracking:
     enabled: true
     provider: wandb

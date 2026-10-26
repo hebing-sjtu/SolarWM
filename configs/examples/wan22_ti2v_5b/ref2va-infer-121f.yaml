@@ -48,7 +48,7 @@ train:
 inference:
   stage: stage0p5
   checkpoint:
-    path: /workspace/wan_proxy/runs/wan5b-ref2va-stage0p5-oc-121f/checkpoint-000600
+    path: /data/binghe/wan_proxy/runs/wan5b-ref2va-stage0p5-oc-121f/checkpoint-000600
     role: student
     weight_source: live
   num_inference_steps: 30

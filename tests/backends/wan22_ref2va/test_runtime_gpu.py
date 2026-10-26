@@ -85,6 +85,7 @@ def base_config(tmp_path, stage, name, *, mode="full"):
         },
         "checkpoint": {
             "save_every_steps": 1,
+            "weights_dtype": "float32",
             "ema": {"enabled": True, "decay": 0.9, "start_step": 1},
         },
         "runtime": {"output_dir": str(tmp_path / name), "tracking": {"enabled": False}},
@@ -144,14 +145,25 @@ def test_gpu_full_chain_and_resume(tmp_path):
     steps = [e for e in events(tmp_path / "sgf") if e["event"] == "train_step"]
     assert [e["student_updated"] for e in steps] == [0.0, 1.0]
 
+    from safetensors.torch import load_file
+
+    assert not (tmp_path / "sgf" / "checkpoint-000001" / "student-resume-rank000.pt").exists()
+    assert (tmp_path / "sgf" / "checkpoint-000002" / "critic-resume-rank000.pt").is_file()
     resumed = copy.deepcopy(sgf)
     resumed["train"]["max_steps"] = 3
     resumed["checkpoint"]["resume_from"] = str(tmp_path / "sgf" / "checkpoint-000002")
     trainer = train(resumed)
-    assert (
-        trainer.global_step == 3
-        and (tmp_path / "sgf" / "checkpoint-000003" / "critic.safetensors").is_file()
-    )
+    assert trainer.global_step == 3
+
+    straight = copy.deepcopy(sgf)
+    straight["train"]["max_steps"] = 3
+    straight["runtime"]["output_dir"] = str(tmp_path / "sgf3")
+    train(straight)
+    a = load_file(str(tmp_path / "sgf" / "checkpoint-000003" / "student.safetensors"))
+    b = load_file(str(tmp_path / "sgf3" / "checkpoint-000003" / "student.safetensors"))
+    assert a.keys() == b.keys()
+    for key in a:
+        torch.testing.assert_close(a[key].float(), b[key].float(), atol=2e-2, rtol=2e-2)
 
 
 def test_gpu_lora_saves_adapters_only(tmp_path):

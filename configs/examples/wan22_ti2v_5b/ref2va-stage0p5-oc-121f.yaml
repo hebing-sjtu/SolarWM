@@ -62,18 +62,20 @@ train:
 
 checkpoint:
   save_every_steps: 100
+  weights_dtype: bfloat16
+  resume_every_steps: 300
   ema:
     enabled: false
     decay: 0.9999
     start_step: 0
   initialization:
     student:
-      path: /workspace/wan_proxy/runs/wan5b-ref2va-stage0p5-121f/checkpoint-000900
+      path: /data/binghe/wan_proxy/runs/wan5b-ref2va-stage0p5-121f/checkpoint-000900
       role: student
       weight_source: live
 
 runtime:
-  output_dir: /workspace/wan_proxy/runs/wan5b-ref2va-stage0p5-oc-121f
+  output_dir: /data/binghe/wan_proxy/runs/wan5b-ref2va-stage0p5-oc-121f
   tracking:
     enabled: true
     provider: wandb

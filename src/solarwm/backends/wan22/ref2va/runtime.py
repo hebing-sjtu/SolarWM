@@ -4,10 +4,12 @@
 optimizer state); ``lora`` freezes the bf16 base under FSDP and trains replicated fp32 adapters
 (plus AnyFlow's delta embedding), whose gradients are averaged by hand.
 
-A checkpoint directory ``checkpoint-NNNNNN`` holds, per trained role (``student``, and
-``critic`` in Stage2): ``ROLE.safetensors`` (trainable weights: the whole model for full
-fine-tuning, adapters for LoRA), optional ``ROLE-ema.safetensors``, the optimizer state, the
-reader positions, and ``COMPLETE.json`` written last. Later stages initialize from these files.
+A checkpoint directory ``checkpoint-NNNNNN`` holds ``student.safetensors`` (the whole model in
+``checkpoint.weights_dtype`` for full fine-tuning, fp32 adapters for LoRA), optional
+``student-ema.safetensors``, and ``COMPLETE.json`` written last; later stages and inference
+initialize from these files. Every ``checkpoint.resume_every_steps`` and at the last step it also
+holds each trained role's exact fp32 state (``ROLE-resume[-rankNNN].pt``: local FSDP shards,
+optimizer, scheduler, EMA shadow; Stage2's critic lives only there) and the reader positions.
 """
 
 from __future__ import annotations
@@ -343,60 +345,77 @@ def finish_update(role: Role, topology: Topology) -> float:
 # ------------------------------------------------------------------------------ checkpoints
 
 
-def _full_state(role: Role, topology: Topology) -> dict[str, Any] | None:
-    """Rank 0's CPU copy of the role's trainable weights; ``None`` elsewhere."""
+def _full_state(role: Role, topology: Topology, dtype: Any) -> dict[str, Any] | None:
+    """Rank 0's CPU copy of the role's trainable weights in ``dtype``; ``None`` elsewhere."""
 
     if not role.full:
         state = adapter_state(role.model, extra_prefixes=("delta_embedding.",))
         return state if topology.is_main else None
     if topology.world == 1:
-        return {
-            clean_name(k): v.detach().float().cpu().contiguous()
-            for k, v in role.model.state_dict().items()
-        }
-    from torch.distributed.fsdp import FullStateDictConfig, StateDictType
-    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-
-    config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-    with FSDP.state_dict_type(role.model, StateDictType.FULL_STATE_DICT, config):
         state = role.model.state_dict()
-    if not topology.is_main:
-        return None
-    return {clean_name(k): v.detach().float().cpu().contiguous() for k, v in state.items()}
+    else:
+        from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+        config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(role.model, StateDictType.FULL_STATE_DICT, config):
+            state = role.model.state_dict()
+        if not topology.is_main:
+            return None
+    return {clean_name(k): v.detach().to(dtype).cpu().contiguous() for k, v in state.items()}
 
 
-def save_role(role: Role, directory: Path, topology: Topology) -> None:
+def save_role_weights(role: Role, directory: Path, topology: Topology, *, dtype: Any) -> None:
+    """``ROLE.safetensors`` (and ``ROLE-ema``): what later stages and inference load."""
+
     from safetensors.torch import save_file
 
-    state = _full_state(role, topology)
+    state = _full_state(role, topology, dtype)
     if state is not None:
         save_file(state, str(directory / f"{role.name}.safetensors"))
     del state
     if role.ema is not None:
         role.ema.swap(role.named)
         try:
-            state = _full_state(role, topology)
+            state = _full_state(role, topology, dtype)
         finally:
             role.ema.swap(role.named)
         if state is not None:
             save_file(state, str(directory / f"{role.name}-ema.safetensors"))
         del state
-    if role.optimizer is not None:
-        shard = role.full or topology.is_main
-        if shard:
-            suffix = f"-rank{topology.rank:03d}" if role.full else ""
-            payload = {
-                "optimizer": role.optimizer.state_dict(),
-                "scheduler": role.scheduler.state_dict(),
-                "ema": None if role.ema is None else role.ema.shadow,
-            }
-            torch.save(payload, directory / f"{role.name}-optimizer{suffix}.pt")
 
 
-def load_role_state(role: Role, directory: Path, topology: Topology) -> None:
+def _resume_file(role: Role, directory: Path, topology: Topology) -> Path:
     suffix = f"-rank{topology.rank:03d}" if role.full else ""
-    path = directory / f"{role.name}-optimizer{suffix}.pt"
-    payload = torch.load(path, map_location=topology.device, weights_only=False)
+    return directory / f"{role.name}-resume{suffix}.pt"
+
+
+def save_role_resume(role: Role, directory: Path, topology: Topology) -> None:
+    """The exact fp32 training state: local FSDP shards per rank, or rank 0's adapters."""
+
+    if not (role.full or topology.is_main):
+        return
+    payload = {
+        "parameters": {name: p.detach().float().cpu().clone() for name, p in role.named},
+        "optimizer": role.optimizer.state_dict(),
+        "scheduler": role.scheduler.state_dict(),
+        "ema": None if role.ema is None else {k: v.cpu() for k, v in role.ema.shadow.items()},
+    }
+    torch.save(payload, _resume_file(role, directory, topology))
+
+
+def load_role_resume(role: Role, directory: Path, topology: Topology) -> None:
+    payload = torch.load(
+        _resume_file(role, directory, topology), map_location="cpu", weights_only=False
+    )
+    saved = payload["parameters"]
+    if sorted(saved) != sorted(name for name, _ in role.named):
+        raise ValueError(f"{directory}: {role.name} resume parameters differ from the model")
+    with torch.no_grad():
+        for name, parameter in role.named:
+            if tuple(saved[name].shape) != tuple(parameter.shape):
+                raise ValueError(f"{directory}: {role.name}.{name} shard shape differs")
+            parameter.data.copy_(saved[name].to(parameter.device, parameter.dtype))
     role.optimizer.load_state_dict(payload["optimizer"])
     role.scheduler.load_state_dict(payload["scheduler"])
     if payload.get("ema") is not None:
@@ -436,12 +455,12 @@ class Ref2VAWanTrainer:
         self.resume_dir = Path(str(resume)) if resume else None
         self.global_step = 0
         self.student_step = 0
+        # A resume rebuilds every role from its initialization, then overwrites the trained
+        # tensors with the checkpoint's fp32 resume state.
         initialization = self.checkpoint_cfg.get("initialization") or {}
-
-        def init_for(role: str, trained: bool) -> Mapping[str, Any] | None:
-            if trained and self.resume_dir is not None:
-                return {"path": str(self.resume_dir), "role": role, "weight_source": "live"}
-            return initialization.get(role)
+        weights_dtype = self.checkpoint_cfg.get("weights_dtype", "bfloat16")
+        self.weights_dtype = getattr(torch, str(weights_dtype))
+        self.resume_every = int(self.checkpoint_cfg.get("resume_every_steps", 0))
 
         anyflow = self.stage in ANYFLOW_STAGES
         self.student = build_role(
@@ -449,7 +468,7 @@ class Ref2VAWanTrainer:
             "student",
             anyflow=anyflow,
             trainable=True,
-            init=init_for("student", True),
+            init=initialization.get("student"),
             topology=self.topology,
         )
         attach_optimizer(self.student, self.train["optimizer"], max_steps=self.max_steps)
@@ -464,7 +483,7 @@ class Ref2VAWanTrainer:
                 init=initialization["teacher"],
                 topology=self.topology,
             )
-            critic_init = init_for("critic", True)
+            critic_init = initialization.get("critic")
             if critic_init is None:
                 raise ValueError("Wan Ref2VA SGF needs checkpoint.initialization.critic")
             self.critic = build_role(
@@ -493,10 +512,14 @@ class Ref2VAWanTrainer:
         state = json.loads((directory / "state.json").read_text())
         if int(state["world_size"]) != self.topology.world or state["stage"] != self.stage:
             raise ValueError("Wan Ref2VA resume needs the same stage and world size")
+        if not state.get("resumable"):
+            raise ValueError(
+                f"{directory} holds weights only; resume from a resume_every_steps step"
+            )
         self.global_step = int(state["global_step"])
         self.student_step = int(state.get("student_step", self.global_step))
         for role in self.roles:
-            load_role_state(role, directory, self.topology)
+            load_role_resume(role, directory, self.topology)
         reader = json.loads((directory / f"reader-rank{self.topology.rank:03d}.json").read_text())
         self.reader.load_state_dict(reader)
         if self.topology.is_main:
@@ -511,18 +534,22 @@ class Ref2VAWanTrainer:
         role.ema.decay = float(cfg["decay"])
         role.ema.update(role.named)
 
-    def save_checkpoint(self, step: int) -> Path:
+    def save_checkpoint(self, step: int, *, resumable: bool) -> Path:
+        """Student weights (and EMA); with ``resumable`` also every role's fp32 state."""
+
         torch.cuda.synchronize(self.topology.device)
         torch.cuda.empty_cache()
         directory = self.output_dir / f"checkpoint-{step:06d}"
         if self.topology.is_main:
             directory.mkdir(parents=True, exist_ok=True)
         barrier()
-        for role in self.roles:
-            save_role(role, directory, self.topology)
-        (directory / f"reader-rank{self.topology.rank:03d}.json").write_text(
-            json.dumps(self.reader.state_dict())
-        )
+        save_role_weights(self.student, directory, self.topology, dtype=self.weights_dtype)
+        if resumable:
+            for role in self.roles:
+                save_role_resume(role, directory, self.topology)
+            (directory / f"reader-rank{self.topology.rank:03d}.json").write_text(
+                json.dumps(self.reader.state_dict())
+            )
         barrier()
         if self.topology.is_main:
             state = {
@@ -533,6 +560,8 @@ class Ref2VAWanTrainer:
                 "global_step": step,
                 "student_step": self.student_step,
                 "world_size": self.topology.world,
+                "resumable": resumable,
+                "weights_dtype": str(self.weights_dtype).removeprefix("torch."),
                 "roles": {role.name: role.identity for role in self.roles},
             }
             (directory / "state.json").write_text(json.dumps(state, indent=2, sort_keys=True))
@@ -706,10 +735,20 @@ class Ref2VAWanTrainer:
                             "peak_allocated_gib": stats["peak_allocated_gib"],
                         }
                     )
-                if policy.should_save(step) or step == self.max_steps:
-                    directory = self.save_checkpoint(step)
+                resumable = step == self.max_steps or bool(
+                    self.resume_every and step % self.resume_every == 0
+                )
+                if resumable or policy.should_save(step):
+                    directory = self.save_checkpoint(step, resumable=resumable)
                     if sink is not None:
-                        sink({"event": "checkpoint", "step": step, "path": str(directory)})
+                        sink(
+                            {
+                                "event": "checkpoint",
+                                "step": step,
+                                "path": str(directory),
+                                "resumable": resumable,
+                            }
+                        )
         finally:
             if wandb is not None:
                 wandb.finish()
