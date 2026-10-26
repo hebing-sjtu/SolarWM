@@ -151,9 +151,10 @@ class Ref2VAWanBDCore:
         i2v_y = None
         if spec.i2v_y:
             frames = max(spec.rollout_latents, spec.latent_frames)
-            latent = torch.zeros((1, 16, frames, spec.latent_height, spec.latent_width), **to)
+            grid = (frames, spec.latent_height, spec.latent_width)
+            latent = torch.zeros((1, 16, *grid), device=self.device, dtype=torch.float32)
             latent[:, :, : spec.latent_frames] = sample.i2v_latent.to(**to).unsqueeze(0)
-            mask = torch.zeros((1, 4, frames, spec.latent_height, spec.latent_width), **to)
+            mask = torch.zeros((1, 4, *grid), device=self.device, dtype=torch.float32)
             mask[:, :, 0] = 1.0
             i2v_y = torch.cat((mask, latent), dim=1)
         prompt = sample.prompt.to(self.device, dtype=torch.bfloat16, non_blocking=True).unsqueeze(0)
