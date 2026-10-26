@@ -58,6 +58,42 @@ _SUPPORTED = frozenset(
     }
 )
 
+# Wan Ref2VA proxy documents (``model.conditioning_mode: ref2va_proxy``) at native clip lengths.
+_REF2VA_WAN_FRAMES = {"wan22_ti2v_5b": 121, "wan22_i2v_a14b": 81}
+_REF2VA_WAN = frozenset(
+    Route(family, stage, causal, objective, variant)
+    for family in _REF2VA_WAN_FRAMES
+    for stage, causal, objective, variant in (
+        ("stage0p5", "bidirectional", "flow_matching", ""),
+        ("stage1", "teacher_forcing", "anyflow_forward_map", "v1_5"),
+        ("stage2", "self_gradient_forcing", "flow_matching", ""),
+    )
+)
+
+
+def is_ref2va_wan(config: Mapping[str, Any]) -> bool:
+    model = config.get("model", {})
+    return (
+        isinstance(model, Mapping)
+        and _ALIASES.get(str(model.get("family", "")).strip().lower()) in _REF2VA_WAN_FRAMES
+        and str(model.get("conditioning_mode", "")).strip().lower() == "ref2va_proxy"
+    )
+
+
+def _validate_ref2va_wan(config: Mapping[str, Any], route: Route) -> Route:
+    if route not in _REF2VA_WAN:
+        allowed = sorted(item.key for item in _REF2VA_WAN if item.family == route.family)
+        raise ConfigurationError(f"unsupported Wan Ref2VA route {route.key!r}; allowed: {allowed}")
+    frames = int(_mapping(config, "data").get("pixel_frames", 0))
+    if frames != _REF2VA_WAN_FRAMES[route.family]:
+        raise ConfigurationError(
+            f"Wan Ref2VA {route.family} requires "
+            f"pixel_frames={_REF2VA_WAN_FRAMES[route.family]}, got {frames}"
+        )
+    if str(model_value(config, "camera_translation_transform", "none")).lower() != "none":
+        raise ConfigurationError("Wan Ref2VA proxy conditioning has no camera transform")
+    return route
+
 
 def _mapping(config: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = config.get(key, {})
@@ -95,6 +131,8 @@ def validate_route(config: Mapping[str, Any]) -> Route:
         return Route(_ALIASES[family_raw], "preencode", "none", "none")
 
     route = resolve_route(config)
+    if is_ref2va_wan(config):
+        return _validate_ref2va_wan(config, route)
     if route not in _SUPPORTED:
         allowed = sorted(item.key for item in _SUPPORTED if item.family == route.family)
         raise ConfigurationError(

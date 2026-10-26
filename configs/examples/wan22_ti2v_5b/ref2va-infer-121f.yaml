@@ -1,0 +1,60 @@
+# Wan2.2 TI2V-5B Ref2VA proxy inference on the 32 heldout samples, data parallel (each rank
+# holds a whole bf16 model). Pick the stage and checkpoint with --set, e.g.
+#   --set inference.stage=stage1 --set inference.checkpoint.path=.../checkpoint-000900
+#   --set inference.num_inference_steps=4
+# stage0p5 counts shifted grid points (n-1 evaluations, as H3); stage1/stage2 use 4 per chunk.
+schema: solarwm.run.v1
+action: infer
+name: wan5b-ref2va-infer-121f
+
+model:
+  family: wan22_ti2v_5b
+  conditioning_mode: ref2va_proxy
+  camera_translation_transform: none
+  weights: /data/models/Wan2.2-TI2V-5B
+  vae_weights: /data/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth
+  training_mode: full
+
+data:
+  input_mode: ref2va_preencoded
+  data_path: /data/binghe/wan_proxy/manifests/gta0930_omni_5b_121f_oc_heldout32.txt
+  pixel_frames: 121
+  fps: 24
+  encoded_latents: 31
+  height: 704
+  width: 1280
+  latent_height: 44
+  latent_width: 80
+  proxy_latent_height: 22
+  proxy_latent_width: 40
+  num_given_latent_frames: 1
+  align_proxy_reference_time: false
+  oc_reference: true
+  oc_drop_prob: 0.0
+  chunk_latents: 5
+  window_chunks: 6
+  train_target_latents: 31
+  seed: 42
+
+train:
+  stage: stage0p5
+  causal_mode: bidirectional
+  objective: flow_matching
+  anyflow_gate: 0.25
+  timestep_shift: 5.0
+  keyframe_noise_augmentation: 0.999
+  num_denoising_steps: 4
+
+inference:
+  stage: stage0p5
+  checkpoint:
+    path: /workspace/wan_proxy/runs/wan5b-ref2va-stage0p5-oc-121f/checkpoint-000600
+    role: student
+    weight_source: live
+  num_inference_steps: 30
+  seed: 0
+  fps: 24
+  save_latents: true
+
+runtime:
+  output_dir: /workspace/wan_proxy/evals/wan5b-ref2va-infer-121f

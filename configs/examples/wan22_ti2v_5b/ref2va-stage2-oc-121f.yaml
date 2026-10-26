@@ -1,0 +1,111 @@
+# Wan2.2 TI2V-5B Ref2VA proxy omni + OC, Stage2 (DMD via self-gradient forcing), full
+# fine-tuning. The S4-A recipe: the causal AnyFlow student (Stage1) rolls out seven five-latent
+# chunks with four denoiser evaluations each through a key/value cache; the frozen teacher and
+# the trained critic are the BD-OC model. Student updated every 5 outer steps, critic every step.
+schema: solarwm.run.v1
+action: train
+name: wan5b-ref2va-stage2-oc-121f
+
+model:
+  family: wan22_ti2v_5b
+  conditioning_mode: ref2va_proxy
+  camera_translation_transform: none
+  weights: /data/models/Wan2.2-TI2V-5B
+  vae_weights: /data/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth
+  training_mode: full
+
+data:
+  input_mode: ref2va_preencoded
+  data_path: /data/binghe/wan_proxy/manifests/gta0930_omni_5b_121f_oc_train.txt
+  pixel_frames: 121
+  fps: 24
+  encoded_latents: 31
+  height: 704
+  width: 1280
+  latent_height: 44
+  latent_width: 80
+  proxy_latent_height: 22
+  proxy_latent_width: 40
+  num_given_latent_frames: 1
+  align_proxy_reference_time: false
+  oc_reference: true
+  oc_drop_prob: 0.2
+  chunk_latents: 5
+  window_chunks: 6
+  train_target_latents: 31
+  seed: 42
+
+distributed:
+  world_size: 8
+
+train:
+  stage: stage2
+  causal_mode: self_gradient_forcing
+  objective: flow_matching
+  anyflow_gate: 0.25
+  micro_batch_size: 1
+  gradient_accumulation_steps: 1
+  global_batch_size: 8
+  max_steps: 2000
+  timestep_shift: 5.0
+  keyframe_noise_augmentation: 0.999
+  critic_updates_per_student: 5
+  num_denoising_steps: 4
+  score_min_sigma: 0.02
+  score_max_sigma: 0.98
+  optimizer:
+    learning_rate: 2.0e-6
+    betas: [0.0, 0.999]
+    epsilon: 1.0e-8
+    weight_decay: 0.0
+    gradient_clip: 10.0
+    warmup_steps: 0
+    min_lr_ratio: 1.0
+  critic_optimizer:
+    learning_rate: 4.0e-7
+    betas: [0.0, 0.999]
+    epsilon: 1.0e-8
+    weight_decay: 0.0
+    gradient_clip: 10.0
+    warmup_steps: 0
+    min_lr_ratio: 1.0
+  fsdp:
+    sharding_strategy: FULL_SHARD
+    frozen_sharding_strategy: FULL_SHARD
+    activation_checkpointing: true
+
+checkpoint:
+  save_every_steps: 100
+  ema:
+    enabled: true
+    decay: 0.99
+    start_step: 39
+  initialization:
+    student:
+      path: /workspace/wan_proxy/runs/wan5b-ref2va-stage1-oc-121f/checkpoint-000600
+      role: student
+      weight_source: live
+    teacher:
+      path: /workspace/wan_proxy/runs/wan5b-ref2va-stage0p5-oc-121f/checkpoint-000600
+      role: student
+      weight_source: live
+    critic:
+      path: /workspace/wan_proxy/runs/wan5b-ref2va-stage0p5-oc-121f/checkpoint-000600
+      role: student
+      weight_source: live
+
+runtime:
+  output_dir: /workspace/wan_proxy/runs/wan5b-ref2va-stage2-oc-121f
+  tracking:
+    enabled: true
+    provider: wandb
+    mode: online
+    project: solarwm-wan-proxy
+    entity: null
+    run_name: wan5b-ref2va-stage2-oc-121f
+    group: wan5b-ref2va-dmd
+    tags: [wan22-ti2v-5b, ref2va, proxy, omni, oc, 704p, 121f, stage2, sgf, dmd, full-ft]
+    run_id: null
+    resume: allow
+    log_media: false
+    loss_ema_beta: 0.95

@@ -1,0 +1,89 @@
+# Wan2.2 TI2V-5B Ref2VA proxy omni + OC sheet, Stage0.5 (BD), full fine-tuning. The R5-B
+# recipe: continue the BD model at step 900 with the OC sheet as <Picture 2> for 600 steps.
+# Color targets carry no OC; OC rows drop the sheet with probability 0.2 per visit.
+schema: solarwm.run.v1
+action: train
+name: wan5b-ref2va-stage0p5-oc-121f
+
+model:
+  family: wan22_ti2v_5b
+  conditioning_mode: ref2va_proxy
+  camera_translation_transform: none
+  weights: /data/models/Wan2.2-TI2V-5B
+  vae_weights: /data/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth
+  training_mode: full
+
+data:
+  input_mode: ref2va_preencoded
+  data_path: /data/binghe/wan_proxy/manifests/gta0930_omni_5b_121f_oc_train.txt
+  pixel_frames: 121
+  fps: 24
+  encoded_latents: 31
+  height: 704
+  width: 1280
+  latent_height: 44
+  latent_width: 80
+  proxy_latent_height: 22
+  proxy_latent_width: 40
+  num_given_latent_frames: 1
+  align_proxy_reference_time: false
+  oc_reference: true
+  oc_drop_prob: 0.2
+  chunk_latents: 5
+  window_chunks: 6
+  train_target_latents: 31
+  seed: 42
+
+distributed:
+  world_size: 16
+
+train:
+  stage: stage0p5
+  causal_mode: bidirectional
+  objective: flow_matching
+  micro_batch_size: 1
+  gradient_accumulation_steps: 1
+  global_batch_size: 16
+  max_steps: 600
+  timestep_shift: 5.0
+  keyframe_noise_augmentation: 0.999
+  optimizer:
+    learning_rate: 1.0e-5
+    betas: [0.9, 0.999]
+    epsilon: 1.0e-8
+    weight_decay: 0.01
+    gradient_clip: 1.0
+    warmup_steps: 10
+    min_lr_ratio: 0.05
+  fsdp:
+    sharding_strategy: FULL_SHARD
+    frozen_sharding_strategy: FULL_SHARD
+    activation_checkpointing: true
+
+checkpoint:
+  save_every_steps: 100
+  ema:
+    enabled: false
+    decay: 0.9999
+    start_step: 0
+  initialization:
+    student:
+      path: /workspace/wan_proxy/runs/wan5b-ref2va-stage0p5-121f/checkpoint-000900
+      role: student
+      weight_source: live
+
+runtime:
+  output_dir: /workspace/wan_proxy/runs/wan5b-ref2va-stage0p5-oc-121f
+  tracking:
+    enabled: true
+    provider: wandb
+    mode: online
+    project: solarwm-wan-proxy
+    entity: null
+    run_name: wan5b-ref2va-stage0p5-oc-121f
+    group: wan5b-ref2va-bd
+    tags: [wan22-ti2v-5b, ref2va, proxy, omni, oc, 704p, 121f, stage0p5, full-ft]
+    run_id: null
+    resume: allow
+    log_media: false
+    loss_ema_beta: 0.95

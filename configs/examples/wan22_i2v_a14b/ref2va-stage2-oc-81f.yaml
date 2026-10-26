@@ -1,0 +1,118 @@
+# Wan2.2 I2V-A14B high-noise expert, Ref2VA proxy omni + OC, Stage2 (DMD via self-gradient
+# forcing), LoRA r128. The S4-A recipe: the AnyFlow student rolls out seven three-latent chunks
+# with four denoiser evaluations each through a key/value cache; BD-OC initializes the frozen
+# teacher (merged) and the trained critic adapter. Student every 5 outer steps, critic every step.
+schema: solarwm.run.v1
+action: train
+name: wan14b-ref2va-stage2-oc-81f
+
+model:
+  family: wan22_i2v_a14b
+  conditioning_mode: ref2va_proxy
+  camera_translation_transform: none
+  weights: /data/models/Wan2.2-I2V-A14B/high_noise_model
+  vae_weights: /data/models/Wan2.2-I2V-A14B/Wan2.1_VAE.pth
+  training_mode: lora
+  reference_i2v_y: self
+  adapter:
+    type: lora
+    target: main_attention_qkvo
+    rank: 128
+    alpha: 128
+    expected_target_linear_modules: 160
+
+data:
+  input_mode: ref2va_preencoded
+  data_path: /data/binghe/wan_proxy/manifests/gta0930_omni_a14b_81f_oc_train.txt
+  pixel_frames: 81
+  fps: 16
+  encoded_latents: 21
+  height: 480
+  width: 832
+  latent_height: 60
+  latent_width: 104
+  proxy_latent_height: 30
+  proxy_latent_width: 52
+  num_given_latent_frames: 1
+  align_proxy_reference_time: false
+  oc_reference: true
+  oc_drop_prob: 0.2
+  chunk_latents: 3
+  window_chunks: 6
+  train_target_latents: 21
+  seed: 42
+
+distributed:
+  world_size: 8
+
+train:
+  stage: stage2
+  causal_mode: self_gradient_forcing
+  objective: flow_matching
+  anyflow_gate: 0.25
+  micro_batch_size: 1
+  gradient_accumulation_steps: 1
+  global_batch_size: 8
+  max_steps: 2000
+  timestep_shift: 5.0
+  keyframe_noise_augmentation: 0.999
+  critic_updates_per_student: 5
+  num_denoising_steps: 4
+  score_min_sigma: 0.02
+  score_max_sigma: 0.98
+  optimizer:
+    learning_rate: 4.0e-6
+    betas: [0.0, 0.999]
+    epsilon: 1.0e-8
+    weight_decay: 0.0
+    gradient_clip: 10.0
+    warmup_steps: 0
+    min_lr_ratio: 1.0
+  critic_optimizer:
+    learning_rate: 8.0e-7
+    betas: [0.0, 0.999]
+    epsilon: 1.0e-8
+    weight_decay: 0.0
+    gradient_clip: 10.0
+    warmup_steps: 0
+    min_lr_ratio: 1.0
+  fsdp:
+    sharding_strategy: HYBRID_SHARD
+    frozen_sharding_strategy: HYBRID_SHARD
+    activation_checkpointing: true
+
+checkpoint:
+  save_every_steps: 100
+  ema:
+    enabled: true
+    decay: 0.99
+    start_step: 39
+  initialization:
+    student:
+      path: /workspace/wan_proxy/runs/wan14b-ref2va-stage1-oc-81f/checkpoint-000600
+      role: student
+      weight_source: live
+    teacher:
+      path: /workspace/wan_proxy/runs/wan14b-ref2va-stage0p5-oc-81f/checkpoint-000600
+      role: student
+      weight_source: live
+    critic:
+      path: /workspace/wan_proxy/runs/wan14b-ref2va-stage0p5-oc-81f/checkpoint-000600
+      role: student
+      weight_source: live
+
+runtime:
+  output_dir: /workspace/wan_proxy/runs/wan14b-ref2va-stage2-oc-81f
+  tracking:
+    enabled: true
+    provider: wandb
+    mode: online
+    project: solarwm-wan-proxy
+    entity: null
+    run_name: wan14b-ref2va-stage2-oc-81f
+    group: wan14b-ref2va-dmd
+    tags: [wan22-i2v-a14b, high-noise, ref2va, proxy, omni, oc, 480p, 81f, stage2, sgf, dmd, lora128]
+    run_id: null
+    resume: allow
+    log_media: false
+    loss_ema_beta: 0.95

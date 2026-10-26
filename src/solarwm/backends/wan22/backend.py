@@ -20,6 +20,13 @@ class Wan22Backend:
     family: str
 
     def validate_config(self, config: Mapping[str, Any]) -> None:
+        from solarwm.config.routes import is_ref2va_wan
+
+        if is_ref2va_wan(config):
+            from .ref2va.config import validate_ref2va_config
+
+            validate_ref2va_config(config, expected_family=self.family)
+            return
         action = str(config.get("action", "")).strip().lower()
         if action == "preencode":
             validate_preencode_config(config, expected_family=self.family)
@@ -37,6 +44,12 @@ class Wan22Backend:
 
     def train(self, config: Mapping[str, Any]) -> int:
         self.validate_config(config)
+        from solarwm.config.routes import is_ref2va_wan
+
+        if is_ref2va_wan(config):
+            from .ref2va.runtime import run_ref2va_training
+
+            return run_ref2va_training(config)
         train = config.get("train", {})
         data = config.get("data", {})
         if (
@@ -157,6 +170,12 @@ class Wan22Backend:
 
     def infer(self, config: Mapping[str, Any]) -> int:
         self.validate_config(config)
+        from solarwm.config.routes import is_ref2va_wan
+
+        if is_ref2va_wan(config):
+            from .ref2va.runtime import run_ref2va_inference
+
+            return run_ref2va_inference(config)
         from .runtime.readiness import probe_runtime
 
         train = config.get("train", {})
