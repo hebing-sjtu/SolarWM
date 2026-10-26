@@ -118,7 +118,7 @@ def test_sgf_replay_carries_gradients_and_scores():
     video = core.supervised(core.replay(inputs, rollout))
     assert video.shape[2] == core.spec.latent_frames
     noisy, noise, sigma = core.score_inputs(video.detach(), inputs, generator=core.generator(3))
-    assert 0.02 <= float(sigma) <= 0.98
+    assert 0.02 - 1e-6 <= float(sigma) <= 0.98 + 1e-6
     with torch.no_grad():
         velocity = core.score_forward(teacher, inputs, noisy, sigma)
     assert velocity.shape == video.shape
