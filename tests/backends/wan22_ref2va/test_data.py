@@ -93,3 +93,23 @@ def test_stream_ranks_disjoint_and_resumable(tmp_path):
 
     eval_stream = Ref2VAWanStream(config(tmp_path), rank=0, world_size=1, training=False)
     assert not any(eval_stream.next().oc_dropped for _ in range(10))
+
+
+@pytest.mark.parametrize("new_world", [4, 16])
+def test_stream_resumes_at_another_world_size(tmp_path, new_world):
+    for index in range(64):
+        write_sample(tmp_path / f"s{index}.pt", oc=False)
+    old = [Ref2VAWanStream(config(tmp_path), rank=rank, world_size=8) for rank in range(8)]
+    consumed = [s.next().sample_id for _ in range(4) for s in old]
+    state = old[0].state_dict()
+    expected = [s.next().sample_id for _ in range(2) for s in old]
+
+    new = [
+        Ref2VAWanStream(config(tmp_path), rank=rank, world_size=new_world)
+        for rank in range(new_world)
+    ]
+    for stream in new:
+        stream.load_state_dict(state)
+    following = [s.next().sample_id for _ in range(16 // new_world) for s in new]
+    assert sorted(following) == sorted(expected)
+    assert not set(following) & set(consumed)

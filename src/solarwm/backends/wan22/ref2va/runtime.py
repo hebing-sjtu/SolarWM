@@ -510,8 +510,17 @@ class Ref2VAWanTrainer:
         if not (directory / "COMPLETE.json").is_file():
             raise FileNotFoundError(f"{directory} is not a complete Wan Ref2VA checkpoint")
         state = json.loads((directory / "state.json").read_text())
-        if int(state["world_size"]) != self.topology.world or state["stage"] != self.stage:
-            raise ValueError("Wan Ref2VA resume needs the same stage and world size")
+        if state["stage"] != self.stage:
+            raise ValueError("Wan Ref2VA resume needs the same stage")
+        saved_world = int(state["world_size"])
+        resharded = saved_world != self.topology.world
+        if resharded and any(role.full for role in self.roles):
+            # Full-mode resume files are per-rank FSDP flat shards; LoRA adapters and their
+            # optimizer state are replicated, so only LoRA runs may change world size.
+            raise ValueError(
+                f"{directory} was saved at world size {saved_world}; only LoRA runs resume "
+                f"at another world size (now {self.topology.world})"
+            )
         if not state.get("resumable"):
             raise ValueError(
                 f"{directory} holds weights only; resume from a resume_every_steps step"
@@ -520,10 +529,15 @@ class Ref2VAWanTrainer:
         self.student_step = int(state.get("student_step", self.global_step))
         for role in self.roles:
             load_role_resume(role, directory, self.topology)
-        reader = json.loads((directory / f"reader-rank{self.topology.rank:03d}.json").read_text())
+        reader_rank = 0 if resharded else self.topology.rank
+        reader = json.loads((directory / f"reader-rank{reader_rank:03d}.json").read_text())
         self.reader.load_state_dict(reader)
         if self.topology.is_main:
-            print(f"[wan-ref2va] resumed {directory} global_step={self.global_step}", flush=True)
+            note = f" (world size {saved_world} -> {self.topology.world})" if resharded else ""
+            print(
+                f"[wan-ref2va] resumed {directory} global_step={self.global_step}{note}",
+                flush=True,
+            )
 
     def _update_ema(self, role: Role, step: int) -> None:
         cfg = self._ema_cfg

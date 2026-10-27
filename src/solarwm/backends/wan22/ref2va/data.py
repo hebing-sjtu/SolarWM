@@ -252,13 +252,17 @@ class Ref2VAWanStream:
         }
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        """Resume; a state saved at another world size continues from the same position of the
+        epoch's shuffled order (all ranks share one cursor), rounded up to the new world size."""
+
         current = self.state_dict()
-        for key in ("seed", "world_size", "paths"):
+        for key in ("seed", "paths"):
             if state.get(key) != current[key]:
                 raise ValueError(f"Wan Ref2VA reader resume field {key!r} differs")
         self.epoch = int(state["epoch"])
         self._reset()
-        self.cursor = int(state["cursor"])
+        position = int(state["cursor"]) * int(state["world_size"])
+        self.cursor = -(-position // self.world_size)
 
 
 __all__ = [
