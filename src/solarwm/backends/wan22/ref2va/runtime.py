@@ -218,6 +218,9 @@ def _wrap(
         )
         for parameter in replicated:
             parameter.data = parameter.data.to(topology.device)
+            # LoRA A is drawn under the trainer's rank-dependent seed; every rank must hold
+            # rank 0's replica or the averaged gradients update mismatched adapters.
+            dist.broadcast(parameter.data, src=0)
     else:
         model = model.to(topology.device)
     if role_trainable and bool(fsdp.get("activation_checkpointing", True)):
