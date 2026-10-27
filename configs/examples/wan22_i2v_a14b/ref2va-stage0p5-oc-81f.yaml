@@ -75,7 +75,7 @@ checkpoint:
     start_step: 0
   initialization:
     student:
-      path: /data/binghe/wan_proxy/runs/wan14b-ref2va-stage0p5-81f/checkpoint-000900
+      path: /data/binghe/wan_proxy/runs/wan14b-ref2va-stage0p5-81f-v2/checkpoint-000900
       role: student
       weight_source: live
 

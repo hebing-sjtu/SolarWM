@@ -4,7 +4,7 @@
 # ref2va-stage0p5-oc-81f continues from step 900 with it (as R5-B).
 schema: solarwm.run.v1
 action: train
-name: wan14b-ref2va-stage0p5-81f
+name: wan14b-ref2va-stage0p5-81f-v2
 
 model:
   family: wan22_i2v_a14b
@@ -77,14 +77,14 @@ checkpoint:
     start_step: 0
 
 runtime:
-  output_dir: /data/binghe/wan_proxy/runs/wan14b-ref2va-stage0p5-81f
+  output_dir: /data/binghe/wan_proxy/runs/wan14b-ref2va-stage0p5-81f-v2
   tracking:
     enabled: true
     provider: wandb
     mode: online
     project: solarwm-wan-proxy
     entity: null
-    run_name: wan14b-ref2va-stage0p5-81f
+    run_name: wan14b-ref2va-stage0p5-81f-v2
     group: wan14b-ref2va-bd
     tags: [wan22-i2v-a14b, high-noise, ref2va, proxy, omni, 480p, 81f, stage0p5, lora128]
     run_id: null
