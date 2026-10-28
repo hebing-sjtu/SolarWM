@@ -55,7 +55,10 @@ def _flex() -> Any:
 
         # One static compile per document length: training, replay and every window rollout size.
         torch._dynamo.config.cache_size_limit = max(int(torch._dynamo.config.cache_size_limit), 64)
-        _COMPILED_FLEX = torch.compile(flex_attention, dynamic=False)
+        # Torch 2.6 default mode finds no valid FlexAttention backward kernel at head_dim 128.
+        _COMPILED_FLEX = torch.compile(
+            flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs"
+        )
     return _COMPILED_FLEX
 
 
