@@ -9,7 +9,7 @@ writes the key/value cache of a chunked causal rollout.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -191,14 +191,18 @@ def build_window_mask(
     return WindowMask(length, padded, block_mask, roles_t, chunks_t)
 
 
-@dataclass
 class RolloutCache:
-    """Rotated keys/values of one rollout: pictures, proxy chunks and the recent clean chunks."""
+    """Rotated keys/values of one rollout: pictures, proxy chunks and the recent clean chunks.
 
-    window_chunks: int
-    pictures: dict[int, tuple[Any, Any]] = field(default_factory=dict)
-    proxy: dict[int, list[tuple[Any, Any]]] = field(default_factory=dict)
-    clean: dict[int, list[tuple[int, Any, Any]]] = field(default_factory=dict)
+    Deliberately not a dataclass: FSDP's root forward-input cast rebuilds dataclasses, dicts and
+    lists, which would hand each forward a fresh copy and drop what the prefill cached.
+    """
+
+    def __init__(self, window_chunks: int) -> None:
+        self.window_chunks = window_chunks
+        self.pictures: dict[int, tuple[Any, Any]] = {}
+        self.proxy: dict[int, list[tuple[Any, Any]]] = {}
+        self.clean: dict[int, list[tuple[int, Any, Any]]] = {}
 
     def visible(self, layer: int, chunk: int) -> tuple[Any, Any]:
         """Everything a target row of ``chunk`` reads besides its own chunk."""

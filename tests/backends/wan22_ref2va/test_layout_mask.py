@@ -167,3 +167,16 @@ def test_flex_attention_matches_masked_sdpa():
         attn_mask=allowed,
     ).transpose(1, 2)
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+
+
+def test_rollout_cache_survives_fsdp_input_cast():
+    from torch.distributed.utils import _apply_to_tensors
+
+    from solarwm.backends.wan22.ref2va.attention import RolloutAttention, RolloutCache
+
+    cache = RolloutCache(2)
+    plan = RolloutAttention("prefill", cache, picture_tokens=1, proxy_chunk_spans=((1, 2),))
+    cast = _apply_to_tensors(lambda t: t.to(torch.bfloat16), {"plan": plan})["plan"]
+    key = torch.zeros(1, 2, 1, 4)
+    cast.attend(key, key, key, layer=0)
+    assert 0 in cache.pictures and 0 in cache.proxy
