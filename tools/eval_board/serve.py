@@ -5,21 +5,30 @@ Standard library only and Python 3.6 compatible, so it runs on a plain host that
 (see sync.py). Files under media/ are content-addressed and never change, so browsers may cache
 them for good; everything else is revalidated on every load.
 
+With --answers DIR, labeling pages may also save their state: a POST of a JSON body to
+/answers/<name>.json replaces DIR/<name>.json, and a GET of that path returns it. DIR sits
+outside --root, so sync.py never overwrites what raters saved.
+
   python3 serve.py --root /data/eval-board --host 0.0.0.0 --port 8766
+  python3 serve.py --root /data/eval-board --answers /data/eval-board-answers --port 8768
 """
 
 import argparse
 import contextlib
+import json
 import mimetypes
 import os
 import re
 import socketserver
+import tempfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import unquote, urlparse
 
 CHUNK = 1 << 20
 RANGE = re.compile(r"bytes=(\d*)-(\d*)$")
+ANSWER = re.compile(r"^/answers/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\.json$")
+MAX_ANSWER_BYTES = 4 << 20
 TYPES = {
     ".mp4": "video/mp4",
     ".json": "application/json",
@@ -46,8 +55,17 @@ def resolve(root, url_path):
     return full
 
 
-def make_handler(root):
+def answer_path(answers, url_path):
+    """The answers file a URL path names, or None if answers are off or the name is not allowed."""
+    if answers is None:
+        return None
+    match = ANSWER.match(unquote(urlparse(url_path).path))
+    return os.path.join(answers, match.group(1) + ".json") if match else None
+
+
+def make_handler(root, answers=None):
     root = os.path.realpath(root)
+    answers = os.path.realpath(answers) if answers else None
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "eval-board/1"
@@ -61,12 +79,51 @@ def make_handler(root):
         def do_GET(self):
             self._respond(body=True)
 
+        def do_POST(self):
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                self._save()
+
         def _respond(self, body):
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 self._send(body)
 
+        def _reply(self, status, payload):
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _save(self):
+            target = answer_path(answers, self.path)
+            if target is None:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= MAX_ANSWER_BYTES:
+                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                return
+            body = self.rfile.read(length)
+            try:
+                json.loads(body.decode("utf-8"))
+            except ValueError:
+                self.send_error(HTTPStatus.BAD_REQUEST, "body is not JSON")
+                return
+            handle, scratch = tempfile.mkstemp(dir=answers, prefix=".", suffix=".json")
+            with os.fdopen(handle, "wb") as out:
+                out.write(body)
+            os.chmod(scratch, 0o644)
+            os.replace(scratch, target)
+            self._reply(HTTPStatus.OK, {"saved": os.path.basename(target), "bytes": length})
+
         def _send(self, body):
-            path = resolve(root, self.path)
+            saved = answer_path(answers, self.path)
+            if saved is not None and not os.path.isfile(saved):
+                self._reply(HTTPStatus.OK, {})
+                return
+            path = saved if saved is not None else resolve(root, self.path)
             if path is None:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -117,8 +174,11 @@ def main():
     parser.add_argument("--root", required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--answers", help="directory for labeling-page state; off when omitted")
     args = parser.parse_args()
-    server = Server((args.host, args.port), make_handler(args.root))
+    if args.answers:
+        os.makedirs(args.answers, exist_ok=True)
+    server = Server((args.host, args.port), make_handler(args.root, args.answers))
     print(f"serving {args.root} on http://{args.host}:{args.port}/", flush=True)
     server.serve_forever()
 
