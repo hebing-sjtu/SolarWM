@@ -14,6 +14,9 @@ Spool layout::
     running/<id>.json        the job being generated, with <id>.progress.json beside it
     out/<id>/                take.mp4, take_compare.mp4, segments/
     done/<id>.json           the result, or {"error": ...}; written last
+
+A job with a ``gate`` (see :mod:`proxy_gate`) has each segment judged and, if it fails,
+regenerated before the take continues; ``segments/seg-XX/try-N/`` keeps every try.
     workers/<name>.json      per-worker heartbeat: state, current job, weights
     STOP                     makes every worker exit after its current job
 """
@@ -32,6 +35,7 @@ from typing import Any
 from solarwm.errors import BackendContractError, DataContractError
 
 from .proxy_artifacts import CWM_CONTINUATION_ROLES
+from .proxy_gate import HttpGate
 from .proxy_rollout import STRIDE_FRAMES, TakeSegment, _WriterState, roll_segments, take_frames
 
 JOB_SCHEMA = "h3-proxy-serve-job.v1"
@@ -215,6 +219,7 @@ def run_proxy_serve(config: Mapping[str, Any]) -> int:
             frames = int(job.get("frames") or take_frames(len(segments)))
             real_target = bool(job.get("real_target"))
             try:
+                gate = HttpGate(job["gate"]) if job.get("gate") else None
                 records = roll_segments(
                     runtime,
                     reader,
@@ -230,6 +235,7 @@ def run_proxy_serve(config: Mapping[str, Any]) -> int:
                     progress=(lambda done, total: spool.progress(job_id, done, total))
                     if spool is not None
                     else None,
+                    gate=gate,
                 )
                 error = ""
             except Exception as exc:

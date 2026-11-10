@@ -257,18 +257,23 @@ def roll_segments(
     writer: _WriterState,
     max_frames: int | None = None,
     progress: Any = None,
+    gate: Any = None,
 ) -> list[dict[str, Any]]:
     """Generate ``segments`` in order, each continuing the last, into ``root``.
 
     Every rank of the SP group calls this; SP rank 0 decodes, writes ``take.mp4``,
     ``take_compare.mp4`` and ``segments/``, and alone returns the segment records.
     ``max_frames`` caps the stitched movies; ``progress(done, total)`` runs on SP rank 0
-    after each segment.
+    after each segment. ``gate`` (a :class:`proxy_gate.HttpGate`, built on every rank) judges
+    each segment on SP rank 0; a failed one is regenerated with seed ``+ 100 * attempt`` up to
+    ``gate.attempts`` tries and the best-judged try continues the take. Try 0 keeps the
+    ungated seed, so a take whose segments all pass is the ungated take.
     """
 
     import numpy as np
 
     from .distributed import broadcast_sp_tensor, get_sp_rank
+    from .proxy_gate import verdict_rank
     from .runtime import _collective_call, _collective_failures
 
     torch, dist, topology, device, core = (
@@ -283,6 +288,7 @@ def roll_segments(
     spans = stitch_spans(len(segments))
     given_shape = (1, 24, GIVEN_LATENTS, int(data["latent_height"]), int(data["latent_width"]))
     cap = take_frames(len(segments)) if max_frames is None else int(max_frames)
+    attempts = gate.attempts if gate is not None else 1
 
     movies: dict[str, _Mp4] = {}
     records: list[dict[str, Any]] = []
@@ -302,53 +308,104 @@ def roll_segments(
                 )
             if given is not None:
                 batch = with_given_latents(batch, given)
-            segment_seed = seed + 1000 * segment.index
-            latents = _collective_call(
-                lambda batch=batch, segment_seed=segment_seed: core.generate(
-                    batch, noise_seed=segment_seed, num_inference_steps=steps
-                ),
-                dist=dist,
-                topology=topology,
-                label=f"take segment {segment.index} generation",
-            )
             last = segment.index == len(segments) - 1
             given = None if last else torch.zeros(given_shape, device=device, dtype=torch.float32)
+            folder = root / "segments" / f"seg-{segment.index:02d}"
+            best: dict[str, Any] | None = None
+            tries: list[dict[str, Any]] = []
+            for attempt in range(attempts):
+                segment_seed = seed + 1000 * segment.index + 100 * attempt
+                latents = _collective_call(
+                    lambda batch=batch, segment_seed=segment_seed: core.generate(
+                        batch, noise_seed=segment_seed, num_inference_steps=steps
+                    ),
+                    dist=dist,
+                    topology=topology,
+                    label=f"take segment {segment.index} generation",
+                )
+                local_error = ""
+                retry = False
+                if writer_rank:
+                    try:
+                        from .inference import decode_h3_latents
+
+                        vae = writer.vae(config, device)
+                        generated = decode_h3_latents(vae, latents, device=device)
+                        tail = None
+                        if not last:
+                            encoded = encode_h3_pixels(
+                                vae, generated[:, :, STRIDE_FRAMES:SEGMENT_FRAMES], device=device
+                            )
+                            if int(encoded.shape[2]) != OVERLAP_LATENTS:
+                                raise BackendContractError(
+                                    f"{OVERLAP_FRAMES} tail frames encoded to "
+                                    f"{int(encoded.shape[2])} latents, expected {OVERLAP_LATENTS}"
+                                )
+                            tail = encoded[:, :, :GIVEN_LATENTS].clone()
+                        size = (int(generated.shape[-2]), int(generated.shape[-1]))
+                        proxy = _frames_uint8(_proxy_pixels(vae, batch.proxy_latents, size, device=device))
+                        produced = _frames_uint8(generated)
+                        panels = [proxy, produced]
+                        if real_target:
+                            target = batch.target_latents.unsqueeze(0)
+                            panels.append(_frames_uint8(decode_h3_latents(vae, target, device=device)))
+                        del generated
+                        candidate = {
+                            "seed": segment_seed,
+                            "latents": latents.detach().to("cpu", dtype=torch.bfloat16).contiguous(),
+                            "tail": tail,
+                            "produced": produced,
+                            "compare": np.concatenate(panels, axis=2),
+                            "verdict": {},
+                        }
+                        if gate is not None:
+                            trial = folder / f"try-{attempt}"
+                            verdict = gate(
+                                segment.index, attempt, proxy=proxy, produced=produced, first=first, folder=trial
+                            )
+                            candidate["verdict"] = verdict
+                            tries.append({"attempt": attempt, "noise_seed": segment_seed, **verdict})
+                            trial_movie = _Mp4(trial / "generated.mp4", fps)
+                            trial_movie.extend(produced)
+                            trial_movie.close()
+                            print(
+                                f"[h3-proxy-rollout] segment {segment.index + 1}/{len(segments)} "
+                                f"try {attempt + 1}/{attempts}: score={verdict.get('score')} "
+                                f"failures={verdict.get('failures')} pass={verdict.get('pass')}",
+                                flush=True,
+                            )
+                        if best is None or verdict_rank(candidate["verdict"]) > verdict_rank(best["verdict"]):
+                            best = candidate
+                        retry = (
+                            gate is not None
+                            and not candidate["verdict"].get("pass", True)
+                            and attempt + 1 < attempts
+                        )
+                    except Exception as exc:
+                        local_error = f"rank {topology.raw_rank}: {type(exc).__name__}: {exc}"
+                failures = _collective_failures(dist, topology, local_error)
+                if failures:
+                    raise BackendContractError("H3 proxy take rollout failed: " + " | ".join(failures))
+                if attempts == 1:
+                    break
+                flag = torch.tensor([1 if retry else 0], device=device, dtype=torch.int32)
+                broadcast_sp_tensor(flag)
+                if not int(flag.item()):
+                    break
             local_error = ""
             if writer_rank:
                 try:
                     from safetensors.torch import save_file
 
-                    from .inference import _mp4_bytes, decode_h3_latents
-
-                    vae = writer.vae(config, device)
-                    generated = decode_h3_latents(vae, latents, device=device)
-                    if not last:
-                        tail = generated[:, :, STRIDE_FRAMES:SEGMENT_FRAMES]
-                        encoded = encode_h3_pixels(vae, tail, device=device)
-                        if int(encoded.shape[2]) != OVERLAP_LATENTS:
-                            raise BackendContractError(
-                                f"{OVERLAP_FRAMES} tail frames encoded to "
-                                f"{int(encoded.shape[2])} latents, expected {OVERLAP_LATENTS}"
-                            )
-                        given.copy_(encoded[:, :, :GIVEN_LATENTS])
-                    size = (int(generated.shape[-2]), int(generated.shape[-1]))
-                    panels = [_frames_uint8(_proxy_pixels(vae, batch.proxy_latents, size, device=device))]
-                    produced = _frames_uint8(generated)
-                    panels.append(produced)
-                    if real_target:
-                        target = batch.target_latents.unsqueeze(0)
-                        panels.append(_frames_uint8(decode_h3_latents(vae, target, device=device)))
-                    compare = np.concatenate(panels, axis=2)
-                    folder = root / "segments" / f"seg-{segment.index:02d}"
+                    assert best is not None
+                    if given is not None:
+                        given.copy_(best["tail"])
                     folder.mkdir(parents=True, exist_ok=True)
-                    save_file(
-                        {"latents": latents.detach().to("cpu", dtype=torch.bfloat16).contiguous()},
-                        str(folder / "generated.safetensors"),
-                    )
-                    (folder / "generated.mp4").write_bytes(_mp4_bytes(generated, fps=fps))
-                    segment_movie = _Mp4(folder / "compare.mp4", fps)
-                    segment_movie.extend(compare)
-                    segment_movie.close()
+                    save_file({"latents": best["latents"]}, str(folder / "generated.safetensors"))
+                    for name, frames in (("generated.mp4", best["produced"]), ("compare.mp4", best["compare"])):
+                        segment_movie = _Mp4(folder / name, fps)
+                        segment_movie.extend(frames)
+                        segment_movie.close()
                     if not movies:
                         movies = {
                             "take": _Mp4(root / "take.mp4", fps),
@@ -356,19 +413,20 @@ def roll_segments(
                         }
                     begin = segment.start + first
                     keep = max(0, min(stop, cap - segment.start) - first)
-                    movies["take"].extend(produced[first : first + keep])
-                    movies["compare"].extend(compare[first : first + keep])
-                    records.append(
-                        {
-                            "index": segment.index,
-                            "name": segment.name,
-                            "cwm_system": segment.cwm_system,
-                            "noise_seed": segment_seed,
-                            "take_frames": [begin, begin + keep],
-                            "segment_frames": [first, first + keep],
-                            "sample": str(segment.path),
-                        }
-                    )
+                    movies["take"].extend(best["produced"][first : first + keep])
+                    movies["compare"].extend(best["compare"][first : first + keep])
+                    record = {
+                        "index": segment.index,
+                        "name": segment.name,
+                        "cwm_system": segment.cwm_system,
+                        "noise_seed": best["seed"],
+                        "take_frames": [begin, begin + keep],
+                        "segment_frames": [first, first + keep],
+                        "sample": str(segment.path),
+                    }
+                    if gate is not None:
+                        record["gate"] = {"kept": best["seed"], "tries": tries}
+                    records.append(record)
                     print(
                         f"[h3-proxy-rollout] dp={topology.dp_rank} segment {segment.index + 1}/"
                         f"{len(segments)} frames {begin}..{begin + keep}",
@@ -378,6 +436,7 @@ def roll_segments(
                         progress(segment.index + 1, len(segments))
                 except Exception as exc:
                     local_error = f"rank {topology.raw_rank}: {type(exc).__name__}: {exc}"
+                best = None
             failures = _collective_failures(dist, topology, local_error)
             if failures:
                 raise BackendContractError("H3 proxy take rollout failed: " + " | ".join(failures))
