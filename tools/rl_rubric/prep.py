@@ -2,10 +2,12 @@
 
 A group is one cached input generated under several seeds by the H3 proxy serve workers
 (``proxy_loop serve``; job ids ``<group>-sNNN-<seg>``). Every video is cut to the take length,
-cropped to the 1280x704 aspect and scaled to 640x352 so the judge sees all streams at one size. The proxy is the human-readable
-form of what the model was given: the low-poly render for ``style``, the depth video, the
-coloured semantic video, or depth beside semantics for ``duv``. Only stdlib and ffmpeg are used,
-so it runs on the pods; the judge itself runs on the Mac.
+cropped to the 1280x704 aspect and scaled to 640x352 so the judge sees all streams at one size.
+Groups written by ``pool.py`` carry their manifest row, media root and named realization, which go
+into ``meta.json`` for the judge; older group lists name a row in ``--manifests``. The proxy is
+the human-readable form of what the model was given: the low-poly render for ``style``, the depth
+video, the coloured semantic video, or depth beside semantics for ``duv``. Only stdlib and ffmpeg
+are used, so it runs on the pods; the judge itself runs on the Mac.
 
     python tools/rl_rubric/prep.py --spool /workspace/rl1/spool --groups /workspace/rl1/groups.json \\
         --manifests A=heldout32.jsonl B=heldout32_oc.jsonl C=heldout32_ocswap.jsonl \\
@@ -87,7 +89,8 @@ def prepare(group: dict, row: dict, takes: dict[int, Path], dataset: Path, out: 
     meta = {"group": group["group"], "name": row["name"], "seg": row["id"], "tag": row.get("tag"),
             "modality": row["proxy_modality"], "proxy_kind": proxy_kind, "target_kind": row["target_kind"],
             "target_style": row.get("target_style"), "sheet": has_sheet, "sheet_donor": row.get("oc_donor"),
-            "prompt": group["prompt"], "seeds": sorted(takes)}
+            "prompt": group["prompt"], "seeds": sorted(takes),
+            **{k: group[k] for k in ("kind", "realization", "realization_set", "event") if k in group}}
     (scratch / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     shutil.rmtree(out, ignore_errors=True)
     scratch.rename(out)
@@ -112,7 +115,7 @@ def sweep(args: argparse.Namespace) -> int:
     for spec in args.manifests:
         tag, path = spec.split("=", 1)
         manifests[tag] = {row["name"]: row for row in map(json.loads, Path(path).read_text().splitlines()) if row}
-    spool, dataset, out = Path(args.spool), Path(args.dataset), Path(args.out)
+    spool, out = Path(args.spool), Path(args.out)
     pending = 0
     for group in groups:
         target = out / group["group"]
@@ -124,7 +127,8 @@ def sweep(args: argparse.Namespace) -> int:
         if len(takes) + len(errors) < args.seeds or len(takes) < 2:
             pending += 1
             continue
-        prepare(group, manifests[group["group"][0]][group["name"]], takes, dataset, target)
+        row = group.get("row") or manifests[group["group"][0]][group["name"]]
+        prepare(group, row, takes, Path(group.get("root") or args.dataset), target)
         print(f"[prep] {group['group']} {group['name']}: {len(takes)} samples", flush=True)
     return pending
 
@@ -133,8 +137,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--spool", required=True)
     p.add_argument("--groups", required=True)
-    p.add_argument("--manifests", nargs="+", required=True, help="TAG=manifest.jsonl, TAG the group letter")
-    p.add_argument("--dataset", required=True)
+    p.add_argument("--manifests", nargs="*", default=[],
+                   help="TAG=manifest.jsonl, TAG the group letter; groups from pool.py carry their own row")
+    p.add_argument("--dataset", help="media root of groups that do not name their own")
     p.add_argument("--out", required=True)
     p.add_argument("--seeds", type=int, default=8)
     p.add_argument("--watch", type=int, default=0, help="re-sweep every N seconds until every group is ready")
