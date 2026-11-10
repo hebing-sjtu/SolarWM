@@ -1,4 +1,4 @@
-"""Rubric v1.1 reward: Gemini ranks every seed of one input in a single call, per dimension, with gates.
+"""Rubric reward: Gemini ranks every seed of one input in a single call, per dimension, with gates.
 
 Each call sees the first frame (<Picture 1>), the character sheet (<Picture 2>, when the input has
 one), the proxy video and the G samples under shuffled letters. For every sample and dimension
@@ -7,6 +7,11 @@ dimension, ties allowed. ``aggregate`` turns ranks into a reward in [0, 1]: a we
 rank scores, with any sample failing a gate (proxy adherence or collapse <= 1) put below every
 sample that passes. Each group is judged under ``--orders`` letter orders so the spread between
 orders measures judge noise.
+
+Rubric v2 is used for groups whose ``meta.json`` names a realization (``pool.py`` pools): the
+named effect or vehicle and the engine's event become the main dimensions, and every sample is
+also classified against the pool's closed list of realizations; a sample classified as anything
+but the named one loses ``MISMATCH`` reward. Other groups keep rubric v1.1.
 
 Runs on the Mac through the RL judge account only:
 
@@ -26,15 +31,13 @@ import string
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import rl_judge
 
-RUBRIC_ID = "rubric-v1.1"
 GATES = ("proxy_adherence", "collapse")
-WEIGHTED = {"interaction": 0.30, "artifacts": 0.20, "identity": 0.15, "first_frame_look": 0.15,
-            "proxy_residue": 0.10, "aesthetic": 0.10}
-DIMENSIONS = GATES + tuple(WEIGHTED)
 GATE_FAIL = 1
+MISMATCH = 0.5
 
 SYSTEM = """You are the reward judge for GameWM, a game engine that hands each event to a video model as a \
 coarse proxy video. The engine owns positions, camera, timing and outcomes; the video model only decides how \
@@ -89,12 +92,89 @@ Ranking: for every dimension list the samples from best to worst as groups of ti
 difference; scores may tie while the ranking still separates samples. For identity without <Picture 2> return \
 an empty ranking. Finally rank the samples overall as a player would prefer them, with the same tie format."""
 
+V2_ANCHORS = """Score every sample on every dimension from 0 to 4 with these anchors, then rank.
 
-def schema(labels: list[str]) -> dict:
+proxy_adherence (gate). Does the sample keep what the proxy fixes: camera path and framing, scene layout, where \
+the protagonist and the other subjects are and how they move, and when the event happens? The proxy fixes \
+positions and timing, not the shape or look of the effect, weapon or vehicle.
+  4 all of it matches; 3 small deviations a player would not notice; 2 one clear deviation (a subject misplaced, \
+timing off by about half a second, a camera drift); 1 major deviation (wrong camera path, a subject missing or \
+added, the event at the wrong time); 0 unrelated to the proxy.
+collapse (gate). Is the video intact?
+  4 intact; 3 one brief minor glitch; 2 a visible local breakdown shorter than half a second; 1 severe melting, \
+body fusion, mosaic or a cut for a noticeable part of the clip; 0 the clip is broken.
+realization. The request names one realization of the event (given above). First set realization_seen to the \
+entry of the closed list a player would name on seeing the clip, then score whether the named realization is what \
+appears, recognisably and convincingly: its shape, material, colour, motion and how it acts on the target (fire \
+burns and bursts, ice shatters into frost, a chain wraps, a swarm engulfs, a blade cuts).
+  4 clearly the named realization, convincing; 3 the named one with a minor weakness (brief, small, slightly \
+off-model); 2 recognisable as the named one but weak, partial or mixed with another; 1 ambiguous or barely \
+visible; 0 absent or a different realization.
+event. Is the mechanic carried out as the engine fixed it (the engine's event is given above)? Ranged: the effect \
+leaves the protagonist's hand or weapon at the proxy's release time, travels to or acts on the opponent the proxy \
+hits (not another person or empty space), and that opponent reacts and falls when the proxy shows the hit. Melee: \
+the blow lands at the proxy's contact time, the effect sits on the striking hand or weapon and at the contact \
+point, and the opponent reacts to that blow.
+  4 all of it; 3 one small mismatch (under half a second, slightly off target); 2 the effect and the fall are \
+disconnected or clearly mistimed; 1 the effect hits the wrong target, or the fall has no visible cause; 0 no attack.
+artifacts. Hands, limbs, faces, weapon and vehicle shapes, texture swimming, flicker, effects or objects popping in \
+or out without cause.
+  4 none seen; 3 one small transient artifact; 2 several small or one clear artifact; 1 frequent artifacts; \
+0 pervasive.
+identity (only when <Picture 2> is given, otherwise null). Does the protagonist match the character sheet \
+(silhouette, outfit, colours, hair, accessories) in every frame? The sheet wins over the first frame if they \
+disagree.
+  4 same character throughout; 3 matches with a minor detail off; 2 recognisable but a clear part differs or \
+drifts; 1 mostly a different character; 0 unrelated.
+first_frame_look. Does the whole clip keep the world that <Picture 1> sets: art style, palette, lighting, scene \
+content, without drifting over time?
+  4 consistent throughout; 3 slight drift; 2 clear drift in one aspect; 1 the look changes substantially; \
+0 unrelated to <Picture 1>.
+proxy_residue. Does proxy appearance leak into the output: capsule or primitive bodies, grey untextured \
+surfaces, depth-gradient colours, flat semantic colour patches, a character left unrendered?
+  4 no leakage; 3 a trace; 2 a visible patch or a partly unrendered character; 1 large proxy-looking regions; \
+0 the output looks like the proxy.
+
+Procedure. First watch every sample against the proxy and list, per sample, what distinguishes it from the \
+others: concrete observations with timestamps (e.g. "3.4s: the fireball leaves his left hand, not the raised \
+right one", "4.1s: the man falls although the ice never reached him"). Then score each dimension from that \
+dimension's own evidence. The dimensions measure different things and their orders usually differ: a sample can \
+have the most convincing effect and the worst timing. Never copy one order into every dimension; evidence such as \
+"stable throughout" or "good" without a time or a visible detail is not evidence.
+
+Ranking: for every dimension list the samples from best to worst as groups of tied letters, e.g. \
+[["C"],["A","F"],["B"],...]. Every letter appears exactly once per dimension. Tie only when you cannot see a \
+difference; scores may tie while the ranking still separates samples. For identity without <Picture 2> return \
+an empty ranking. Finally rank the samples overall as a player would prefer them, with the same tie format."""
+
+
+class Rubric(NamedTuple):
+    id: str
+    weighted: dict[str, float]
+    anchors: str
+
+    @property
+    def dimensions(self) -> tuple[str, ...]:
+        return GATES + tuple(self.weighted)
+
+
+V1 = Rubric("rubric-v1.1", {"interaction": 0.30, "artifacts": 0.20, "identity": 0.15, "first_frame_look": 0.15,
+                            "proxy_residue": 0.10, "aesthetic": 0.10}, ANCHORS)
+V2 = Rubric("rubric-v2.0", {"realization": 0.30, "event": 0.25, "artifacts": 0.15, "identity": 0.10,
+                            "first_frame_look": 0.10, "proxy_residue": 0.10}, V2_ANCHORS)
+
+
+def rubric_for(meta: dict) -> Rubric:
+    return V2 if meta.get("realization") else V1
+
+
+def schema(labels: list[str], rubric: Rubric, choices: list[str] | None = None) -> dict:
+    dims = rubric.dimensions
     dim = {"type": "OBJECT", "properties": {"evidence": {"type": "STRING"},
                                             "score": {"type": "INTEGER", "nullable": True}},
            "required": ["evidence", "score"], "propertyOrdering": ["evidence", "score"]}
     ranking = {"type": "ARRAY", "items": {"type": "ARRAY", "items": {"type": "STRING", "enum": labels}}}
+    head = ["label", "observations"] + (["realization_seen"] if choices else [])
     return {
         "type": "OBJECT",
         "properties": {
@@ -103,11 +183,12 @@ def schema(labels: list[str]) -> dict:
                 "type": "OBJECT",
                 "properties": {"label": {"type": "STRING", "enum": labels},
                                "observations": {"type": "ARRAY", "items": {"type": "STRING"}},
-                               **{d: dim for d in DIMENSIONS}},
-                "required": ["label", "observations", *DIMENSIONS],
-                "propertyOrdering": ["label", "observations", *DIMENSIONS]}},
-            "rankings": {"type": "OBJECT", "properties": {d: ranking for d in DIMENSIONS},
-                         "required": list(DIMENSIONS), "propertyOrdering": list(DIMENSIONS)},
+                               **({"realization_seen": {"type": "STRING", "enum": choices}} if choices else {}),
+                               **{d: dim for d in dims}},
+                "required": [*head, *dims],
+                "propertyOrdering": [*head, *dims]}},
+            "rankings": {"type": "OBJECT", "properties": {d: ranking for d in dims},
+                         "required": list(dims), "propertyOrdering": list(dims)},
             "overall": ranking,
         },
         "required": ["proxy_summary", "samples", "rankings", "overall"],
@@ -115,13 +196,17 @@ def schema(labels: list[str]) -> dict:
     }
 
 
-def request(group: Path, meta: dict, order: list[int], fps: float) -> tuple[list[dict], list[str]]:
+def request(group: Path, meta: dict, order: list[int], fps: float, rubric: Rubric) -> tuple[list[dict], list[str]]:
     labels = list(string.ascii_uppercase[:len(order)])
     sheet = meta["sheet"] and (group / "sheet.jpg").exists()
     intro = (f"Inputs of the generation. Proxy modality: {meta['proxy_kind']}. Caption (the event and the look):\n"
              f"{meta['prompt']}\n"
              + ("<Picture 2> is the protagonist's character sheet (front / side / back).\n" if sheet else
                 "No character sheet was given; return null scores and an empty ranking for identity.\n"))
+    if rubric is V2:
+        intro += (f"The named realization of this event: {meta['realization']}.\n"
+                  f"The engine's event: {meta['event']}\n"
+                  f"Closed list for realization_seen: {', '.join(meta['realization_set'])}.\n")
     parts = [{"text": intro}, {"text": "<Picture 1>, the first frame:"},
              rl_judge.media(group / "first.jpg", "image/jpeg")]
     if sheet:
@@ -130,7 +215,7 @@ def request(group: Path, meta: dict, order: list[int], fps: float) -> tuple[list
     for label, seed in zip(labels, order):
         parts += [{"text": f"Sample {label}:"},
                   rl_judge.media(group / "samples" / f"s{seed:03d}.mp4", "video/mp4", fps=fps)]
-    parts.append({"text": ANCHORS})
+    parts.append({"text": rubric.anchors})
     return parts, labels
 
 
@@ -147,14 +232,16 @@ def tie_ranks(groups: list[list[str]], labels: list[str]) -> dict[str, float] | 
     return ranks
 
 
-def parse(reply: dict, labels: list[str], seeds: list[int], sheet: bool) -> dict:
+def parse(reply: dict, labels: list[str], seeds: list[int], sheet: bool, rubric: Rubric) -> dict:
     data = json.loads(rl_judge.text(reply))
+    dims = rubric.dimensions
     by_label = dict(zip(labels, seeds))
-    scores = {by_label[s["label"]]: {d: s[d]["score"] for d in DIMENSIONS} for s in data["samples"]}
+    scores = {by_label[s["label"]]: {d: s[d]["score"] for d in dims} for s in data["samples"]}
+    seen = {by_label[s["label"]]: s["realization_seen"] for s in data["samples"] if "realization_seen" in s}
     evidence = {by_label[s["label"]]: {"observations": s.get("observations", []),
-                                       **{d: s[d]["evidence"] for d in DIMENSIONS}} for s in data["samples"]}
+                                       **{d: s[d]["evidence"] for d in dims}} for s in data["samples"]}
     ranks, bad = {}, []
-    for dim in DIMENSIONS + ("overall",):
+    for dim in dims + ("overall",):
         if dim == "identity" and not sheet:
             continue
         groups = data["overall"] if dim == "overall" else data["rankings"][dim]
@@ -165,35 +252,45 @@ def parse(reply: dict, labels: list[str], seeds: list[int], sheet: bool) -> dict
             ranks[dim] = {by_label[label]: value for label, value in r.items()}
     if sorted(scores) != sorted(seeds):
         bad.append("samples")
+    if rubric is V2 and sorted(seen) != sorted(seeds):
+        bad.append("realization_seen")
     return {"proxy_summary": data["proxy_summary"], "scores": scores, "evidence": evidence, "ranks": ranks,
-            "invalid": bad}
+            **({"seen": seen} if rubric is V2 else {}), "invalid": bad}
 
 
-def aggregate(call: dict, seeds: list[int], sheet: bool) -> dict[int, dict]:
-    """Per seed: gate flag, rank-based reward in [0, 1] and score-based reward in [0, 1]."""
-    weights = {d: w for d, w in WEIGHTED.items() if sheet or d != "identity"}
+def aggregate(call: dict, seeds: list[int], sheet: bool, rubric: Rubric, named: str | None = None) -> dict[int, dict]:
+    """Per seed: gate flag, rank-based reward in [0, 1] and score-based reward in [0, 1].
+
+    A gate failure costs 1 and, under v2, a sample classified as another realization costs ``MISMATCH``,
+    so both sit below every passing sample of the group whatever their rank scores.
+    """
+    weights = {d: w for d, w in rubric.weighted.items() if sheet or d != "identity"}
     total = sum(weights.values())
     span = max(len(seeds) - 1, 1)
     out = {}
     for seed in seeds:
         sc = call["scores"][seed]
         gate = all(sc[g] is not None and sc[g] > GATE_FAIL for g in GATES)
+        match = call.get("seen", {}).get(seed, named) == named
         rank = sum(w * (1 - call["ranks"][d][seed] / span) for d, w in weights.items() if d in call["ranks"]) / total
         absolute = sum(w * (sc[d] or 0) / 4 for d, w in weights.items()) / total
-        out[seed] = {"gate": gate, "rank_reward": rank, "abs_reward": absolute,
-                     "reward": rank if gate else rank - 1.0,
+        out[seed] = {"gate": gate, "match": match, "rank_reward": rank, "abs_reward": absolute,
+                     "reward": rank - (0.0 if gate else 1.0) - (0.0 if match else MISMATCH),
                      "overall_rank": call["ranks"].get("overall", {}).get(seed)}
     return out
 
 
 def judge_group(group: Path, order_index: int, args: argparse.Namespace) -> dict:
     meta = json.loads((group / "meta.json").read_text())
+    rubric = rubric_for(meta)
     seeds = list(meta["seeds"])
     order = seeds[:]
-    random.Random(f"{RUBRIC_ID}:{meta['group']}:{order_index}").shuffle(order)
+    random.Random(f"{rubric.id}:{meta['group']}:{order_index}").shuffle(order)
     sheet = bool(meta["sheet"])
-    parts, labels = request(group, meta, order, args.fps)
-    config = {"responseMimeType": "application/json", "responseSchema": schema(labels),
+    named = meta.get("realization")
+    parts, labels = request(group, meta, order, args.fps, rubric)
+    config = {"responseMimeType": "application/json",
+              "responseSchema": schema(labels, rubric, meta.get("realization_set") if rubric is V2 else None),
               "temperature": args.temperature, "maxOutputTokens": 16384,
               "thinkingConfig": {"thinkingLevel": args.thinking}}
     last = None
@@ -201,8 +298,8 @@ def judge_group(group: Path, order_index: int, args: argparse.Namespace) -> dict
         started = time.time()
         try:
             reply = rl_judge.generate(parts, system=SYSTEM, config=config, timeout=600,
-                                      tag=f"{RUBRIC_ID} {meta['group']} o{order_index}")
-            call = parse(reply, labels, order, sheet)
+                                      tag=f"{rubric.id} {meta['group']} o{order_index}")
+            call = parse(reply, labels, order, sheet, rubric)
         except (RuntimeError, ValueError, KeyError) as error:
             if "budget" in str(error):
                 raise
@@ -212,12 +309,12 @@ def judge_group(group: Path, order_index: int, args: argparse.Namespace) -> dict
             last = f"invalid {call['invalid']}"
             continue
         usage = reply.get("usageMetadata", {})
-        return {"rubric": RUBRIC_ID, "group": meta["group"], "name": meta["name"], "order_index": order_index,
-                "order": order, "labels": labels, "sheet": sheet, "seconds": round(time.time() - started, 1),
-                "usage": usage, **call,
-                "rewards": {str(k): v for k, v in aggregate(call, seeds, sheet).items()} if not call["invalid"]
-                else None}
-    return {"rubric": RUBRIC_ID, "group": meta["group"], "order_index": order_index, "error": last}
+        return {"rubric": rubric.id, "group": meta["group"], "name": meta["name"], "order_index": order_index,
+                "order": order, "labels": labels, "sheet": sheet, "realization": named,
+                "seconds": round(time.time() - started, 1), "usage": usage, **call,
+                "rewards": {str(k): v for k, v in aggregate(call, seeds, sheet, rubric, named).items()}
+                if not call["invalid"] else None}
+    return {"rubric": rubric.id, "group": meta["group"], "order_index": order_index, "error": last}
 
 
 def judge(args: argparse.Namespace) -> None:
@@ -274,10 +371,11 @@ def summary(args: argparse.Namespace) -> None:
             taus.append(tau)
         mean = {s: sum(r[s] for r in rewards) / len(rewards) for s in rewards[0]}
         gates = {s: all(c["rewards"][str(s)]["gate"] for c in calls.values()) for s in mean}
+        matches = [c["rewards"][str(s)].get("match", True) for c in calls.values() for s in mean]
         spread.append(max(mean.values()) - min(mean.values()))
         best = sorted(mean, key=mean.get, reverse=True)
         print(f"{group} tau={tau if tau is None else round(tau, 2)} gate_fail={sum(not g for g in gates.values())} "
-              f"order={best} reward={[round(mean[s], 2) for s in best]}")
+              f"match={sum(matches)}/{len(matches)} order={best} reward={[round(mean[s], 2) for s in best]}")
     if taus:
         print(f"mean Kendall tau between orders {sum(taus) / len(taus):.2f} over {len(taus)} groups; "
               f"mean reward spread {sum(spread) / len(spread):.2f}")
