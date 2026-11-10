@@ -15,6 +15,7 @@ unparseable judge passes the segment, so a judge outage never stalls a take.
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.request
 from collections.abc import Mapping
@@ -45,11 +46,12 @@ class HttpGate:
             p, g = folder / f"proxy-{i:03d}.jpg", folder / f"generated-{i:03d}.jpg"
             Image.fromarray(proxy[i]).save(p, quality=92)
             Image.fromarray(produced[i]).save(g, quality=92)
-            pairs.append([str(p), str(g)])
+            pairs.append([_b64(p), _b64(g)])
+        # Images travel as bytes: the judge may run on another pod, where these paths do not exist.
         request = {
-            "anchor": self.anchor,
-            "oc": self.oc,
-            "pairs": pairs,
+            "anchor_b64": _b64(Path(self.anchor)),
+            "oc_b64": _b64(Path(self.oc)) if self.oc else None,
+            "pairs_b64": pairs,
             "tag": f"seg{index:02d} try{attempt}",
         }
         try:
@@ -60,12 +62,18 @@ class HttpGate:
                 verdict = json.loads(response.read())
         except Exception as exc:
             verdict = {"error": f"{type(exc).__name__}: {exc}"}
+            print(f"[h3-proxy-gate] JUDGE ERROR seg{index:02d} try{attempt}: {verdict['error']} "
+                  "(segment passes unjudged)", flush=True)
         verdict.pop("raw", None)
         score = verdict.get("score")
         usable = verdict.get("parsed") and score is not None and "error" not in verdict
         verdict["pass"] = (not verdict.get("failures") and float(score) >= self.min_score) if usable else True
         (folder / "verdict.json").write_text(json.dumps(verdict, ensure_ascii=False, indent=2) + "\n")
         return verdict
+
+
+def _b64(path: Path) -> str:
+    return base64.b64encode(path.read_bytes()).decode("ascii")
 
 
 def verdict_rank(verdict: Mapping[str, Any]) -> tuple[int, float, int]:

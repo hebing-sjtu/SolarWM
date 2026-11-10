@@ -116,6 +116,51 @@ def test_failed_segments_are_retried_and_the_kept_try_continues_the_take(rollout
     assert [round(given) for seed, given in core.calls[4:]] == [SEED + 1200] * 3
 
 
+def test_http_gate_sends_image_bytes_and_scores_the_verdict(tmp_path: Path) -> None:
+    import base64
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import numpy as np
+    from PIL import Image
+
+    from solarwm.backends.minimax_h3.proxy_gate import HttpGate
+
+    seen: list[dict] = []
+
+    class Judge(BaseHTTPRequestHandler):
+        def log_message(self, *_: Any) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            seen.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            body = json.dumps({"parsed": True, "score": 9, "failures": ["structures"]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Judge)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    anchor = tmp_path / "anchor.png"
+    Image.new("RGB", (8, 8)).save(anchor)
+    frames = np.zeros((124, 8, 8, 3), dtype=np.uint8)
+    try:
+        gate = HttpGate({"url": f"http://127.0.0.1:{server.server_port}/judge", "anchor": str(anchor), "samples": 3})
+        verdict = gate(1, 0, proxy=frames, produced=frames, first=34, folder=tmp_path / "try-0")
+    finally:
+        server.shutdown()
+    assert verdict["pass"] is False and verdict["score"] == 9
+    request = seen[0]
+    assert len(request["pairs_b64"]) == 3 and "pairs" not in request
+    assert base64.b64decode(request["anchor_b64"]) == anchor.read_bytes()
+
+    down = HttpGate({"url": "http://127.0.0.1:9/judge", "anchor": str(anchor), "timeout": 2})
+    verdict = down(1, 0, proxy=frames, produced=frames, first=34, folder=tmp_path / "try-1")
+    assert verdict["pass"] is True and "error" in verdict
+
+
 def test_verdict_rank_prefers_a_pass_then_the_score() -> None:
     assert verdict_rank({"pass": True, "score": 6}) > verdict_rank({"pass": False, "score": 9})
     assert verdict_rank({"pass": False, "score": 7}) > verdict_rank({"pass": False, "score": 5})
