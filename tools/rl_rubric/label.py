@@ -151,6 +151,8 @@ def build(args: argparse.Namespace) -> None:
         samples = "".join(SAMPLE.format(label=l, id=meta["group"], src=f"{rel}/{l}.mp4") for l in labels)
         sheet = f'<img src="{rel}/sheet.jpg">' if meta["sheet"] else "<small>（无设定图）</small>"
         info = f"{meta['tag'] or ''} · proxy: {meta['proxy_kind']} · 目标: {meta['target_kind']}/{meta['target_style']}"
+        if meta.get("realization"):
+            info = f"指定实现: {meta['realization']} · {info}"
         cards.append(GROUP.format(id=meta["group"], n=n, info=html.escape(info), caption=html.escape(meta["prompt"]),
                                   first=f"{rel}/first.jpg", sheet=sheet, proxy=f"{rel}/proxy.mp4", samples=samples))
     page = PAGE.format(title=html.escape(args.title), total=len(cards), groups="\n".join(cards),
