@@ -142,7 +142,7 @@ def build(args: argparse.Namespace) -> None:
         # Published names carry the letter, not the seed, so the page reveals nothing.
         media = out / "media" / meta["group"]
         media.mkdir(parents=True, exist_ok=True)
-        for name in ("first.jpg", "sheet.jpg", "proxy.mp4"):
+        for name in ("first.jpg", "sheet.jpg", "vehicle.jpg", "proxy.mp4"):
             if (group / name).exists():
                 shutil.copyfile(group / name, media / name)
         for letter, seed in labels.items():
@@ -150,6 +150,8 @@ def build(args: argparse.Namespace) -> None:
         rel = f"media/{meta['group']}"
         samples = "".join(SAMPLE.format(label=l, id=meta["group"], src=f"{rel}/{l}.mp4") for l in labels)
         sheet = f'<img src="{rel}/sheet.jpg">' if meta["sheet"] else "<small>（无设定图）</small>"
+        if (group / "vehicle.jpg").exists():
+            sheet += f'<small>指定载具（仅供参考，模型没看到）</small><img src="{rel}/vehicle.jpg">'
         info = f"{meta['tag'] or ''} · proxy: {meta['proxy_kind']} · 目标: {meta['target_kind']}/{meta['target_style']}"
         if meta.get("realization"):
             info = f"指定实现: {meta['realization']} · {info}"

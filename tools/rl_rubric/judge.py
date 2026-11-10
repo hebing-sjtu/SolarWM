@@ -106,7 +106,9 @@ body fusion, mosaic or a cut for a noticeable part of the clip; 0 the clip is br
 realization. The request names one realization of the event (given above). First set realization_seen to the \
 entry of the closed list a player would name on seeing the clip, then score whether the named realization is what \
 appears, recognisably and convincingly: its shape, material, colour, motion and how it acts on the target (fire \
-burns and bursts, ice shatters into frost, a chain wraps, a swarm engulfs, a blade cuts).
+burns and bursts, ice shatters into frost, a chain wraps, a swarm engulfs, a blade cuts). A named vehicle or \
+mount keeps its kind and the design of <Picture 3> in every frame (it does not turn into a car), and the \
+protagonist uses it the way that vehicle is used: onto a saddle or seat, astride a bike, through a cabin door.
   4 clearly the named realization, convincing; 3 the named one with a minor weakness (brief, small, slightly \
 off-model); 2 recognisable as the named one but weak, partial or mixed with another; 1 ambiguous or barely \
 visible; 0 absent or a different realization.
@@ -114,9 +116,14 @@ event. Is the mechanic carried out as the engine fixed it (the engine's event is
 leaves the protagonist's hand or weapon at the proxy's release time, travels to or acts on the opponent the proxy \
 hits (not another person or empty space), and that opponent reacts and falls when the proxy shows the hit. Melee: \
 the blow lands at the proxy's contact time, the effect sits on the striking hand or weapon and at the contact \
-point, and the opponent reacts to that blow.
+point, and the opponent reacts to that blow. Vehicle: entering, the protagonist reaches the vehicle and mounts \
+or boards it when the proxy does, then rides off with it as the proxy moves; leaving, the vehicle stops, the \
+protagonist gets off when the proxy does and stays beside it. Nobody is in two places, the vehicle does not \
+drive or hover off empty while the protagonist is still on it, and no second copy of the protagonist appears.
   4 all of it; 3 one small mismatch (under half a second, slightly off target); 2 the effect and the fall are \
-disconnected or clearly mistimed; 1 the effect hits the wrong target, or the fall has no visible cause; 0 no attack.
+disconnected or clearly mistimed, or the mount or dismount is mistimed; 1 the effect hits the wrong target, the \
+fall has no visible cause, or the protagonist and vehicle part without a mount or dismount; 0 no attack, no \
+boarding or no leaving.
 artifacts. Hands, limbs, faces, weapon and vehicle shapes, texture swimming, flicker, effects or objects popping in \
 or out without cause.
   4 none seen; 3 one small transient artifact; 2 several small or one clear artifact; 1 frequent artifacts; \
@@ -207,10 +214,16 @@ def request(group: Path, meta: dict, order: list[int], fps: float, rubric: Rubri
         intro += (f"The named realization of this event: {meta['realization']}.\n"
                   f"The engine's event: {meta['event']}\n"
                   f"Closed list for realization_seen: {', '.join(meta['realization_set'])}.\n")
+    vehicle = (group / "vehicle.jpg").exists()
+    if vehicle:
+        intro += ("<Picture 3> is the identity sheet of the named vehicle. It is a reference for judging only; "
+                  "the model saw the vehicle only in the first frame and the caption.\n")
     parts = [{"text": intro}, {"text": "<Picture 1>, the first frame:"},
              rl_judge.media(group / "first.jpg", "image/jpeg")]
     if sheet:
         parts += [{"text": "<Picture 2>, the character sheet:"}, rl_judge.media(group / "sheet.jpg", "image/jpeg")]
+    if vehicle:
+        parts += [{"text": "<Picture 3>, the vehicle sheet:"}, rl_judge.media(group / "vehicle.jpg", "image/jpeg")]
     parts += [{"text": "The proxy video:"}, rl_judge.media(group / "proxy.mp4", "video/mp4", fps=fps)]
     for label, seed in zip(labels, order):
         parts += [{"text": f"Sample {label}:"},

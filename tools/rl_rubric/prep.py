@@ -80,10 +80,15 @@ def prepare(group: dict, row: dict, takes: dict[int, Path], dataset: Path, out: 
     shutil.rmtree(scratch, ignore_errors=True)
     (scratch / "samples").mkdir(parents=True)
     proxy_kind = proxy(row, dataset, scratch / "proxy.mp4")
-    first_frame(dataset / row["target"], scratch / "first.jpg", row.get("target_crop"))
+    if row.get("take_anchor"):
+        first_frame(dataset / row["take_anchor"], scratch / "first.jpg")
+    else:
+        first_frame(dataset / row["target"], scratch / "first.jpg", row.get("target_crop"))
     has_sheet = bool(row.get("oc"))
     if has_sheet:
         sheet(dataset / row["oc"], scratch / "sheet.jpg")
+    if group.get("vehicle_sheet"):
+        sheet(Path(group["vehicle_sheet"]), scratch / "vehicle.jpg")
     for seed, take in sorted(takes.items()):
         video(take, scratch / "samples" / f"s{seed:03d}.mp4")
     meta = {"group": group["group"], "name": row["name"], "seg": row["id"], "tag": row.get("tag"),

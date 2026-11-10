@@ -19,6 +19,13 @@ Then encode with FastVideo's ``encode_proxy_samples.py`` (flags as for the OC ca
     text:  --manifest encode/text.jsonl --root DATASET --text-only --text-source encode/src --output cache/text
     oc:    --manifest encode/text.jsonl --root DATASET --oc-refresh --text-source cache/text --output cache/oc
 
+``vehicle`` groups swap the car of a training enter/exit row for another vehicle: an edited first frame
+(``take_anchor``, under ``--assets``) and a rewritten caption, encoded from pixels, then the row's
+protagonist sheet put back. Their vehicle sheet (``sheet``) only goes to the judge and the board::
+
+    full:  --manifest encode/vehicle.jsonl --root DATASET --output cache/vfull
+    oc:    --manifest encode/vehicle.jsonl --root DATASET --oc-refresh --text-source cache/vfull --output cache/oc
+
 ``enqueue`` drops one ``h3-proxy-serve-job.v1`` per group and seed into a serve spool; ``prep.py``
 reads ``groups.json`` directly.
 
@@ -52,7 +59,7 @@ def build(args: argparse.Namespace) -> None:
     index = {row["name"]: row for row in map(json.loads, Path(args.index).read_text().splitlines()) if row}
     links = work / "encode" / "src"
     links.mkdir(parents=True, exist_ok=True)
-    full, text, groups = [], [], []
+    full, text, vehicle, groups = [], [], [], []
     for spec in pool["groups"]:
         kind = spec["kind"]
         if kind == "ranged":
@@ -76,15 +83,25 @@ def build(args: argparse.Namespace) -> None:
             link.symlink_to(source)
             root, pt, event = args.dataset, work / "cache" / "oc" / f"{name}.pt", pool["events"]["melee"]
             text.append(row)
+        elif kind == "vehicle":
+            base = index[spec["base"]]
+            name = f"{spec['group']}__{spec['base']}"
+            row = {**base, "name": name, "prompt": spec["prompt"], "base": spec["base"],
+                   "take_anchor": str(Path(args.assets) / spec["anchor"])}
+            root, pt, event = args.dataset, work / "cache" / "oc" / f"{name}.pt", pool["events"][base["tag"]]
+            vehicle.append(row)
         else:
             raise SystemExit(f"{spec['group']}: unknown kind {kind!r}")
         groups.append({"group": spec["group"], "kind": kind, "name": name, "root": str(root), "row": row,
                        "prompt": spec["prompt"], "realization": spec["realization"],
-                       "realization_set": pool["sets"][kind], "event": event, "pt": str(pt)})
-    for path, rows in ((work / "encode" / "full.jsonl", full), (work / "encode" / "text.jsonl", text)):
+                       "realization_set": pool["sets"][kind], "event": event, "pt": str(pt),
+                       **({"vehicle_sheet": str(Path(args.assets) / spec["sheet"])} if spec.get("sheet") else {})})
+    for path, rows in ((work / "encode" / "full.jsonl", full), (work / "encode" / "text.jsonl", text),
+                       (work / "encode" / "vehicle.jsonl", vehicle)):
         path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
     write_json(work / "groups.json", groups)
-    print(f"{pool['pool']}: {len(groups)} groups ({len(full)} full, {len(text)} re-captioned) -> {work}")
+    print(f"{pool['pool']}: {len(groups)} groups ({len(full)} full, {len(text)} re-captioned, "
+          f"{len(vehicle)} vehicle swaps) -> {work}")
 
 
 def seed_range(text: str) -> list[int]:
@@ -118,9 +135,10 @@ def main() -> None:
     b = sub.add_parser("build")
     b.add_argument("--pool", required=True)
     b.add_argument("--index", required=True, help="manifest holding the melee base rows")
-    b.add_argument("--text-source", required=True, help="cache directory holding the melee base samples")
+    b.add_argument("--text-source", default="", help="cache directory holding the melee base samples")
     b.add_argument("--dataset", required=True)
-    b.add_argument("--shoot-root", required=True)
+    b.add_argument("--shoot-root", default="")
+    b.add_argument("--assets", default="", help="directory of the vehicle groups' edited first frames and sheets")
     b.add_argument("--work", required=True)
     e = sub.add_parser("enqueue")
     e.add_argument("--work", required=True)
