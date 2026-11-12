@@ -393,11 +393,12 @@ def roll_segments(
                 broadcast_sp_tensor(flag)
                 if not int(flag.item()):
                     break
-            stop = torch.tensor([0], device=device, dtype=torch.int32)
+            # not ``stop``: that name is this segment's stitch span end, used below
+            halt = torch.tensor([0], device=device, dtype=torch.int32)
             if writer_rank and getattr(gate, "strict", False) and best is not None:
-                stop[0] = 0 if best["verdict"].get("pass", True) else 1
-            broadcast_sp_tensor(stop)
-            if int(stop.item()):
+                halt[0] = 0 if best["verdict"].get("pass", True) else 1
+            broadcast_sp_tensor(halt)
+            if int(halt.item()):
                 if writer_rank:
                     records.append({
                         "index": segment.index,
