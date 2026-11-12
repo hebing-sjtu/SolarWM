@@ -267,7 +267,8 @@ def roll_segments(
     after each segment. ``gate`` (a :class:`proxy_gate.HttpGate`, built on every rank) judges
     each segment on SP rank 0; a failed one is regenerated with seed ``+ 100 * attempt`` up to
     ``gate.attempts`` tries and the best-judged try continues the take. Try 0 keeps the
-    ungated seed, so a take whose segments all pass is the ungated take.
+    ungated seed, so a take whose segments all pass is the ungated take. A strict gate ends the
+    take at a segment no try passes: its record carries ``"stopped": true`` and no frames.
     """
 
     import numpy as np
@@ -392,6 +393,27 @@ def roll_segments(
                 broadcast_sp_tensor(flag)
                 if not int(flag.item()):
                     break
+            stop = torch.tensor([0], device=device, dtype=torch.int32)
+            if writer_rank and getattr(gate, "strict", False) and best is not None:
+                stop[0] = 0 if best["verdict"].get("pass", True) else 1
+            broadcast_sp_tensor(stop)
+            if int(stop.item()):
+                if writer_rank:
+                    records.append({
+                        "index": segment.index,
+                        "name": segment.name,
+                        "cwm_system": segment.cwm_system,
+                        "sample": str(segment.path),
+                        "stopped": True,
+                        "gate": {"kept": None, "tries": tries},
+                    })
+                    print(
+                        f"[h3-proxy-rollout] segment {segment.index + 1}/{len(segments)} failed all "
+                        f"{attempts} tries; the take ends before it",
+                        flush=True,
+                    )
+                best = None
+                break
             local_error = ""
             if writer_rank:
                 try:

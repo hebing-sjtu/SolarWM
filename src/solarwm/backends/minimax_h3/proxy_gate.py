@@ -5,10 +5,13 @@ later segment only ever sees the last 34 frames of the one before, so a bad segm
 caught and regenerated before the take moves on. A job opts in with::
 
     "gate": {"url": "http://HOST:7870/judge", "anchor": ".../anchor.png", "oc": ".../oc.jpg",
-             "attempts": 3, "min_score": 6, "samples": 6}
+             "attempts": 3, "min_score": 6, "samples": 6, "strict": false, "clip_frames": 0}
 
 ``roll_segments`` calls the gate on SP rank 0 after every generated segment; a segment that fails
 is regenerated with a new noise seed, up to ``attempts`` tries, and the best-judged try is kept.
+With ``strict`` a segment that fails every try ends the take there instead: it is not stitched in
+and no later segment is generated. ``clip_frames`` also sends that many evenly spaced frames of the
+segment, for a judge that checks motion as well as layout.
 The judge is FastVideo's ``scripts/h3_proxy/serve/segment_judge.py``; an unreachable or
 unparseable judge passes the segment, so a judge outage never stalls a take.
 """
@@ -32,6 +35,8 @@ class HttpGate:
         self.min_score = float(spec.get("min_score", 6))
         self.samples = max(1, int(spec.get("samples", 6)))
         self.timeout = float(spec.get("timeout", 600))
+        self.strict = bool(spec.get("strict", False))
+        self.clip_frames = max(0, int(spec.get("clip_frames", 0)))
 
     def __call__(self, index: int, attempt: int, *, proxy: Any, produced: Any, first: int, folder: Path) -> dict[str, Any]:
         """Judge the frames ``produced[first:]`` against ``proxy`` (both ``[T, H, W, 3]`` uint8)."""
@@ -54,6 +59,15 @@ class HttpGate:
             "pairs_b64": pairs,
             "tag": f"seg{index:02d} try{attempt}",
         }
+        if self.clip_frames:
+            clip = []
+            for i in np.linspace(first, len(produced) - 1, self.clip_frames).round().astype(int):
+                path = folder / f"clip-{i:03d}.jpg"
+                Image.fromarray(produced[i]).save(path, quality=90)
+                clip.append(_b64(path))
+            request["clip_b64"] = clip
+            request["clip_fps"] = 24
+            request["clip_frames"] = [int(i) for i in np.linspace(first, len(produced) - 1, self.clip_frames).round()]
         try:
             post = urllib.request.Request(
                 self.url, data=json.dumps(request).encode(), headers={"Content-Type": "application/json"}

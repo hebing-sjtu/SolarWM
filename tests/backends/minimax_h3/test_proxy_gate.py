@@ -116,6 +116,17 @@ def test_failed_segments_are_retried_and_the_kept_try_continues_the_take(rollout
     assert [round(given) for seed, given in core.calls[4:]] == [SEED + 1200] * 3
 
 
+def test_a_strict_gate_ends_the_take_at_a_segment_no_try_passes(rollout) -> None:
+    run, core = rollout
+    gate = FakeGate({1: [(False, 3), (False, 4), (False, 5)]})
+    gate.strict = True
+    records = run(gate)
+    # segment 2 is never generated, and segment 1 is recorded without frames
+    assert [seed for seed, _ in core.calls] == [SEED, SEED + 1000, SEED + 1100, SEED + 1200]
+    assert [r.get("stopped", False) for r in records] == [False, True]
+    assert "take_frames" not in records[1] and len(records[1]["gate"]["tries"]) == 3
+
+
 def test_http_gate_sends_image_bytes_and_scores_the_verdict(tmp_path: Path) -> None:
     import base64
     import json
@@ -147,13 +158,15 @@ def test_http_gate_sends_image_bytes_and_scores_the_verdict(tmp_path: Path) -> N
     Image.new("RGB", (8, 8)).save(anchor)
     frames = np.zeros((124, 8, 8, 3), dtype=np.uint8)
     try:
-        gate = HttpGate({"url": f"http://127.0.0.1:{server.server_port}/judge", "anchor": str(anchor), "samples": 3})
+        gate = HttpGate({"url": f"http://127.0.0.1:{server.server_port}/judge", "anchor": str(anchor), "samples": 3,
+                         "clip_frames": 5})
         verdict = gate(1, 0, proxy=frames, produced=frames, first=34, folder=tmp_path / "try-0")
     finally:
         server.shutdown()
     assert verdict["pass"] is False and verdict["score"] == 9
     request = seen[0]
     assert len(request["pairs_b64"]) == 3 and "pairs" not in request
+    assert len(request["clip_b64"]) == 5 and request["clip_frames"][0] == 34
     assert base64.b64decode(request["anchor_b64"]) == anchor.read_bytes()
 
     down = HttpGate({"url": "http://127.0.0.1:9/judge", "anchor": str(anchor), "timeout": 2})
